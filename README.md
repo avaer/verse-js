@@ -121,7 +121,8 @@ and `tests/embedding/host.test.ts` for working examples of each.
   diagnostics as squiggles (error-recovering parser + type/effect checker),
   checker-backed hover/go-to-definition, and scope-aware completions —
   all workspace-wide, so symbols defined in other files resolve too and
-  go-to-definition jumps across tabs
+  go-to-definition jumps across tabs. Analysis runs in a **Web Worker**
+  (with a same-thread fallback), so typing never blocks on the checker
 - **Run button** (F5): lex → parse → check → compile to JS closures →
   execute, with output streaming into the console panel. Straight-line code
   runs synchronously; execution only goes async at real suspension points

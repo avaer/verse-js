@@ -109,6 +109,34 @@ test('Cross-file go-to-definition opens the defining file tab', async ({ page })
 	).toBeVisible();
 });
 
+test('Semantic analysis runs in a Web Worker and streams live diagnostics', async ({ page }) => {
+	await openIde(page);
+
+	// The IDE spawns a dedicated analysis worker alongside Monaco's editor
+	// worker as soon as the workspace loads.
+	await expect
+		.poll(() => page.workers().filter((w) => w.url().includes('analysis')).length)
+		.toBeGreaterThan(0);
+
+	// Replace the buffer with code that has a type error; the checker runs
+	// in the worker and its diagnostics come back as squiggles.
+	await page.evaluate(() => {
+		const editor = (window as unknown as { __verseEditor?: import('monaco-editor').editor.IStandaloneCodeEditor }).__verseEditor;
+		if (!editor) {
+			throw new Error('Monaco editor not found');
+		}
+		editor.getModel()!.setValue('X : int = "not an int"\n');
+	});
+	await expect(page.locator('.monaco-editor .squiggly-error').first()).toBeVisible();
+
+	// Fixing the code clears the markers again.
+	await page.evaluate(() => {
+		const editor = (window as unknown as { __verseEditor?: import('monaco-editor').editor.IStandaloneCodeEditor }).__verseEditor;
+		editor!.getModel()!.setValue('X : int = 42\n');
+	});
+	await expect(page.locator('.monaco-editor .squiggly-error')).toHaveCount(0);
+});
+
 test('Reset clears persistent weak_map storage', async ({ page }) => {
 	await openIde(page);
 	page.on('dialog', (dialog) => dialog.accept());

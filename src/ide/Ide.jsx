@@ -16,7 +16,8 @@ import DebugPanel from './DebugPanel.jsx';
 import DocsPanel from './DocsPanel.jsx';
 import { loadFiles, saveFiles, loadUiState, saveUiState, makeLogEntry } from './store.js';
 import { VerseRunCancelled, VerseTaskCancelled } from '@/src/verse';
-import { ideHost, idePersistence, ideWorkspace } from './verse-host';
+import { ideHost, idePersistence } from './verse-host';
+import { analysisClient } from './analysis-client';
 import { DebugSession } from '@/src/verse/debug/DebugSession';
 import { EXAMPLE_FILES } from './examples.js';
 
@@ -89,18 +90,24 @@ export default function Ide() {
 		});
 	}, []);
 
-	// --- workspace mirror for Monaco intellisense (cross-file analysis) ---
-	useEffect(() => {
-		ideWorkspace.setFiles(files);
-	}, [files]);
-
 	// --- diagnostics on a debounce while typing (whole workspace) ---
+	// The sources go to the analysis worker immediately (Monaco hover/
+	// definition/completions query the same snapshot); the diagnostics
+	// round-trip is debounced, and the checker runs off the main thread.
 	useEffect(() => {
+		analysisClient.setFiles(files);
+		let stale = false;
 		const timeout = setTimeout(() => {
-			const result = ideHost.compileWorkspace(files);
-			setDiagnostics(groupDiagnosticsByFile(result.diagnostics, Object.keys(files)));
+			analysisClient.diagnostics().then((workspaceDiagnostics) => {
+				if (!stale) {
+					setDiagnostics(groupDiagnosticsByFile(workspaceDiagnostics, Object.keys(files)));
+				}
+			}).catch(() => {});
 		}, 300);
-		return () => clearTimeout(timeout);
+		return () => {
+			stale = true;
+			clearTimeout(timeout);
+		};
 	}, [files]);
 
 	// --- file operations ---

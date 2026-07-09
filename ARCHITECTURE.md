@@ -425,11 +425,30 @@ member info on each AST node's `sema` bag while checking, so these
 queries are lookups, not re-analysis. `host.analyze(source)` is cheap
 enough to run per keystroke; `host.analyzeWorkspace(fs)` returns a
 `WorkspaceAnalysis` — one `SourceAnalysis` per file over the shared
-module scope, so queries resolve symbols defined in other files. The
-Monaco layer analyzes the whole IDE workspace (cached on a workspace
-version, with per-file last-good fallbacks so intellisense survives
-mid-edit syntax errors) and hands cross-file definition jumps to the IDE
-shell, which owns tabs and models.
+module scope, so queries resolve symbols defined in other files.
+
+In the IDE, per-keystroke analysis runs **off the main thread**. The
+pieces (all in `src/ide/`):
+
+- `analysis-engine.ts` — `AnalysisEngine` holds the workspace sources and
+  a host, re-analyzes lazily on the first query after a change (rapid
+  edits cost nothing), and keeps per-file last-good analyses so
+  hover/completions survive mid-edit syntax errors. Its answers are plain
+  serializable objects — no AST or scope objects cross the boundary.
+- `analysis.worker.ts` — the Web Worker entry: an engine over its own
+  identically-configured host, driven by a tiny request/response
+  protocol (`setFiles` is fire-and-forget; queries carry an id).
+- `analysis-client.ts` — the main-thread singleton the UI talks to. It
+  spawns the worker on demand and degrades to running the same engine
+  synchronously (same dispatcher, so behavior is identical) when workers
+  are unavailable or the worker crashes.
+
+The Monaco providers (`src/monaco/verse-intellisense.js`) are async and
+query the client, so typing and hover never block on a workspace
+compile; `Ide.jsx` gets its debounced live diagnostics from the same
+worker. Only the registry-derived docs index (no source compiling) stays
+on the main-thread host. Cross-file definition jumps are handed to the
+IDE shell, which owns tabs and models.
 
 `docs.ts` generates `ModuleDoc`/`SymbolDoc` structures from a registry —
 the docs panel, hover fallbacks, and `using`-path completions all read

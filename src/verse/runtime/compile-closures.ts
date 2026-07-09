@@ -47,6 +47,23 @@ function chain(v: unknown, f: (value: unknown) => unknown): unknown {
 	return isPromise(v) ? v.then(f) : f(v);
 }
 
+/** `expr?` semantics, hoisted so query sites allocate no per-eval closure. */
+function queryValue(v: unknown): unknown {
+	if (v === FAIL) {
+		return FAIL;
+	}
+	if (v instanceof VOption) {
+		return v.isSet ? v.value : FAIL;
+	}
+	if (typeof v === 'boolean') {
+		return v ? undefined : FAIL;
+	}
+	if (isTask(v as Value)) {
+		return (v as VTask).isComplete() ? undefined : FAIL;
+	}
+	throw new VerseRuntimeError("'?' applied to a value that is not an option or logic");
+}
+
 /** Runtime class object: also a first-class type value (cast target). */
 export class RuntimeClass extends VTypeValue {
 	info: ClassInfo;
@@ -868,8 +885,12 @@ class Compiler {
 				return this.compileBlock(expr);
 			case 'Tuple': {
 				const list = this.compileList(expr.elements, Compiler.embedMarks(expr.elements));
-				return (env, ctx) => chain(list(env, ctx), (values) =>
-					values === FAIL ? FAIL : new VTuple(values as Value[]));
+				const toTuple = (values: unknown): unknown =>
+					values === FAIL ? FAIL : new VTuple(values as Value[]);
+				return (env, ctx) => {
+					const r = list(env, ctx);
+					return isPromise(r) ? r.then(toTuple) : toTuple(r);
+				};
 			}
 			case 'ArrayLit': {
 				const list = this.compileList(expr.elements, Compiler.embedMarks(expr.elements));
@@ -880,19 +901,33 @@ class Compiler {
 				const valueExprs = expr.entries.map((e) => e.value);
 				const keys = this.compileList(keyExprs, Compiler.embedMarks(keyExprs));
 				const values = this.compileList(valueExprs, Compiler.embedMarks(valueExprs));
-				return (env, ctx) => chain(keys(env, ctx), (ks) => {
+				const build = (ks: Value[], vs: Value[]): VMap => {
+					const map = new VMap();
+					for (let i = 0; i < ks.length; i++) {
+						map.set(ks[i], vs[i]);
+					}
+					return map;
+				};
+				return (env, ctx) => {
+					const ks = keys(env, ctx);
+					if (isPromise(ks)) {
+						return ks.then((kv) => {
+							if (kv === FAIL) {
+								return FAIL;
+							}
+							return chain(values(env, ctx), (vs) =>
+								vs === FAIL ? FAIL : build(kv as Value[], vs as Value[]));
+						});
+					}
 					if (ks === FAIL) {
 						return FAIL;
 					}
-					return chain(values(env, ctx), (vs) => {
-						if (vs === FAIL) {
-							return FAIL;
-						}
-						const map = new VMap();
-						(ks as Value[]).forEach((k, i) => map.set(k, (vs as Value[])[i]));
-						return map;
-					});
-				});
+					const vs = values(env, ctx);
+					if (isPromise(vs)) {
+						return vs.then((vv) => (vv === FAIL ? FAIL : build(ks as Value[], vv as Value[])));
+					}
+					return vs === FAIL ? FAIL : build(ks as Value[], vs as Value[]);
+				};
 			}
 			case 'OptionLit': {
 				if (!expr.value) {
@@ -914,21 +949,33 @@ class Compiler {
 			case 'RangeExpr': {
 				const low = this.compileExpr(expr.low);
 				const high = this.compileExpr(expr.high);
-				return (env, ctx) => chain(low(env, ctx), (lo) => {
+				const build = (lo: number, hi: number): Value[] => {
+					const result: Value[] = [];
+					for (let i = lo; i <= hi; i++) {
+						result.push(i);
+					}
+					return result;
+				};
+				return (env, ctx) => {
+					const lo = low(env, ctx);
+					if (isPromise(lo)) {
+						return lo.then((lv) => {
+							if (lv === FAIL) {
+								return FAIL;
+							}
+							return chain(high(env, ctx), (hv) =>
+								hv === FAIL ? FAIL : build(lv as number, hv as number));
+						});
+					}
 					if (lo === FAIL) {
 						return FAIL;
 					}
-					return chain(high(env, ctx), (hi) => {
-						if (hi === FAIL) {
-							return FAIL;
-						}
-						const result: Value[] = [];
-						for (let i = lo as number; i <= (hi as number); i++) {
-							result.push(i);
-						}
-						return result;
-					});
-				});
+					const hi = high(env, ctx);
+					if (isPromise(hi)) {
+						return hi.then((hv) => (hv === FAIL ? FAIL : build(lo as number, hv as number)));
+					}
+					return hi === FAIL ? FAIL : build(lo as number, hi as number);
+				};
 			}
 			case 'TypeLit':
 				return () => new VTypeValue('type', null, (v) => v);
@@ -939,68 +986,87 @@ class Compiler {
 			case 'AndExpr': {
 				const left = this.compileExpr(expr.left);
 				const right = this.compileExpr(expr.right);
-				return (env, ctx) => chain(left(env, ctx), (l) =>
-					l === FAIL ? FAIL : right(env, ctx));
+				return (env, ctx) => {
+					const l = left(env, ctx);
+					if (isPromise(l)) {
+						return l.then((lv) => (lv === FAIL ? FAIL : right(env, ctx)));
+					}
+					return l === FAIL ? FAIL : right(env, ctx);
+				};
 			}
 			case 'OrExpr': {
 				const left = this.compileExpr(expr.left);
 				const right = this.compileExpr(expr.right);
 				if (semaOf(expr).contextWrites === false) {
 					// Read-only left side: nothing to roll back on failure.
-					return (env, ctx) => chain(left(env, ctx), (l) =>
-						l === FAIL ? right(env, ctx) : l);
+					return (env, ctx) => {
+						const l = left(env, ctx);
+						if (isPromise(l)) {
+							return l.then((lv) => (lv === FAIL ? right(env, ctx) : lv));
+						}
+						return l === FAIL ? right(env, ctx) : l;
+					};
 				}
 				return (env, ctx) => {
 					const saved = ctx.txn;
 					const txn = new Transaction(saved);
 					ctx.txn = txn;
-					const finish = (l: unknown): unknown => {
-						ctx.txn = saved;
-						if (l === FAIL) {
-							txn.rollback();
-							return right(env, ctx);
-						}
-						txn.commit();
-						return l;
-					};
-					return chain(left(env, ctx), finish);
+					const l = left(env, ctx);
+					if (isPromise(l)) {
+						return l.then((lv) => {
+							ctx.txn = saved;
+							if (lv === FAIL) {
+								txn.rollback();
+								return right(env, ctx);
+							}
+							txn.commit();
+							return lv;
+						});
+					}
+					ctx.txn = saved;
+					if (l === FAIL) {
+						txn.rollback();
+						return right(env, ctx);
+					}
+					txn.commit();
+					return l;
 				};
 			}
 			case 'NotExpr': {
 				const operand = this.compileExpr(expr.operand);
 				if (semaOf(expr).contextWrites === false) {
 					// Read-only operand: nothing to roll back.
-					return (env, ctx) => chain(operand(env, ctx), (r) =>
-						r === FAIL ? undefined : FAIL);
+					return (env, ctx) => {
+						const r = operand(env, ctx);
+						if (isPromise(r)) {
+							return r.then((v) => (v === FAIL ? undefined : FAIL));
+						}
+						return r === FAIL ? undefined : FAIL;
+					};
 				}
 				return (env, ctx) => {
 					const saved = ctx.txn;
 					const txn = new Transaction(saved);
 					ctx.txn = txn;
-					return chain(operand(env, ctx), (r) => {
-						ctx.txn = saved;
-						txn.rollback(); // `not` always rolls back its operand
-						return r === FAIL ? undefined : FAIL;
-					});
+					const r = operand(env, ctx);
+					if (isPromise(r)) {
+						return r.then((v) => {
+							ctx.txn = saved;
+							txn.rollback(); // `not` always rolls back its operand
+							return v === FAIL ? undefined : FAIL;
+						});
+					}
+					ctx.txn = saved;
+					txn.rollback(); // `not` always rolls back its operand
+					return r === FAIL ? undefined : FAIL;
 				};
 			}
 			case 'QueryExpr': {
 				const operand = this.compileExpr(expr.operand);
-				return (env, ctx) => chain(operand(env, ctx), (v) => {
-					if (v === FAIL) {
-						return FAIL;
-					}
-					if (v instanceof VOption) {
-						return v.isSet ? v.value : FAIL;
-					}
-					if (typeof v === 'boolean') {
-						return v ? undefined : FAIL;
-					}
-					if (isTask(v as Value)) {
-						return (v as VTask).isComplete() ? undefined : FAIL;
-					}
-					throw new VerseRuntimeError("'?' applied to a value that is not an option or logic");
-				});
+				return (env, ctx) => {
+					const r = operand(env, ctx);
+					return isPromise(r) ? r.then(queryValue) : queryValue(r);
+				};
 			}
 			case 'Call':
 				return this.compileCall(expr);
@@ -1320,7 +1386,7 @@ class Compiler {
 	private compileUnary(expr: Extract<Expr, { kind: 'Unary' }>): Code {
 		const operand = this.compileExpr(expr.operand);
 		const op = expr.op;
-		return (env, ctx) => chain(operand(env, ctx), (v) => {
+		const apply = (v: unknown): unknown => {
 			if (v === FAIL) {
 				return FAIL;
 			}
@@ -1331,7 +1397,11 @@ class Compiler {
 				return new VRational(-v.num, v.den);
 			}
 			return -(v as number);
-		});
+		};
+		return (env, ctx) => {
+			const v = operand(env, ctx);
+			return isPromise(v) ? v.then(apply) : apply(v);
+		};
 	}
 
 	private compileBinary(expr: Extract<Expr, { kind: 'Binary' }>): Code {
@@ -1617,39 +1687,71 @@ class Compiler {
 		const bodyValues = this.compileList(expr.body);
 		const line = expr.span.start.line;
 
-		return (env, ctx) => chain(callee(env, ctx), (cls) => {
-			if (cls === FAIL) {
-				return FAIL;
+		const finish = (cls: unknown, values: Value[], body: Value[], env: Env, ctx: Ctx): unknown => {
+			const provided = new Map<string, unknown>();
+			for (let i = 0; i < fieldNames.length; i++) {
+				provided.set(fieldNames[i], values[i]);
 			}
-			return chain(fieldValues(env, ctx), (values) => {
-				if (values === FAIL) {
-					return FAIL;
+			if (cls instanceof RuntimeClass) {
+				return this.instantiate(cls, provided, env, ctx);
+			}
+			if (cls instanceof NativeClassValue) {
+				if (!cls.entry.construct) {
+					throw new VerseRuntimeError(`'${cls.entry.name}' cannot be constructed directly`, line);
 				}
-				return chain(bodyValues(env, ctx), (body) => {
-					if (body === FAIL) {
+				return cls.entry.construct(provided as Map<string, Value>, ctx);
+			}
+			// logic{expr}: succeed -> true, fail -> false (failure ctx).
+			if (cls instanceof VTypeValue && cls.name === 'logic') {
+				const b = body[0];
+				return b !== undefined ? true : false;
+			}
+			throw new VerseRuntimeError('Archetype instantiation requires a class', line);
+		};
+
+		// Sync-first: continuation closures only on the (rare) async path.
+		return (env, ctx) => {
+			const c = callee(env, ctx);
+			if (isPromise(c)) {
+				return c.then((cls) => {
+					if (cls === FAIL) {
 						return FAIL;
 					}
-					const provided = new Map<string, unknown>();
-					fieldNames.forEach((n, i) => provided.set(n, (values as Value[])[i]));
-
-					if (cls instanceof RuntimeClass) {
-						return this.instantiate(cls, provided, env, ctx);
-					}
-					if (cls instanceof NativeClassValue) {
-						if (!cls.entry.construct) {
-							throw new VerseRuntimeError(`'${cls.entry.name}' cannot be constructed directly`, line);
+					return chain(fieldValues(env, ctx), (values) => {
+						if (values === FAIL) {
+							return FAIL;
 						}
-						return cls.entry.construct(provided as Map<string, Value>, ctx);
-					}
-					// logic{expr}: succeed -> true, fail -> false (failure ctx).
-					if (cls instanceof VTypeValue && cls.name === 'logic') {
-						const b = (body as Value[])[0];
-						return b !== undefined ? true : false;
-					}
-					throw new VerseRuntimeError('Archetype instantiation requires a class', line);
+						return chain(bodyValues(env, ctx), (body) =>
+							body === FAIL ? FAIL : finish(cls, values as Value[], body as Value[], env, ctx));
+					});
 				});
-			});
-		});
+			}
+			if (c === FAIL) {
+				return FAIL;
+			}
+			const fv = fieldValues(env, ctx);
+			if (isPromise(fv)) {
+				return fv.then((values) => {
+					if (values === FAIL) {
+						return FAIL;
+					}
+					return chain(bodyValues(env, ctx), (body) =>
+						body === FAIL ? FAIL : finish(c, values as Value[], body as Value[], env, ctx));
+				});
+			}
+			if (fv === FAIL) {
+				return FAIL;
+			}
+			const bv = bodyValues(env, ctx);
+			if (isPromise(bv)) {
+				return bv.then((body) =>
+					body === FAIL ? FAIL : finish(c, fv as Value[], body as Value[], env, ctx));
+			}
+			if (bv === FAIL) {
+				return FAIL;
+			}
+			return finish(c, fv as Value[], bv as Value[], env, ctx);
+		};
 	}
 
 	// =====================================================================
@@ -1972,27 +2074,36 @@ class Compiler {
 		}));
 		const line = expr.span.start.line;
 
-		return (env, ctx) => chain(subject(env, ctx), (s) => {
-			if (s === FAIL) {
-				return FAIL;
-			}
-			const tryArm = (index: number): unknown => {
-				if (index >= arms.length) {
-					throw new VerseRuntimeError("No case pattern matched (add a '_' arm)", line);
-				}
-				const arm = arms[index];
+		// Arm chaining is a plain loop; closures only on the async path.
+		const tryArms = (s: unknown, start: number, env: Env, ctx: Ctx): unknown => {
+			for (let i = start; i < arms.length; i++) {
+				const arm = arms[i];
 				if (!arm.pattern) {
 					return arm.body(env, ctx);
 				}
-				return chain(arm.pattern(env, ctx), (p) => {
-					if (p !== FAIL && verseEquals(s as Value, p as Value)) {
-						return arm.body(env, ctx);
-					}
-					return tryArm(index + 1);
-				});
-			};
-			return tryArm(0);
-		});
+				const p = arm.pattern(env, ctx);
+				if (isPromise(p)) {
+					return p.then((pv) => {
+						if (pv !== FAIL && verseEquals(s as Value, pv as Value)) {
+							return arm.body(env, ctx);
+						}
+						return tryArms(s, i + 1, env, ctx);
+					});
+				}
+				if (p !== FAIL && verseEquals(s as Value, p as Value)) {
+					return arm.body(env, ctx);
+				}
+			}
+			throw new VerseRuntimeError("No case pattern matched (add a '_' arm)", line);
+		};
+
+		return (env, ctx) => {
+			const s = subject(env, ctx);
+			if (isPromise(s)) {
+				return s.then((sv) => (sv === FAIL ? FAIL : tryArms(sv, 0, env, ctx)));
+			}
+			return s === FAIL ? FAIL : tryArms(s, 0, env, ctx);
+		};
 	}
 
 	private compileFor(expr: ForExpr, discardResults = false): Code {

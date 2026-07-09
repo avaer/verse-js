@@ -16,7 +16,9 @@ const VERSE_LANGUAGE_ID = 'verse';
 const VERSE_SCOPE_NAME = 'source.verse';
 
 // Served from public/onig.wasm (copied from vscode-oniguruma/release).
-const ONIG_WASM_URL = '/onig.wasm';
+// The base path prefix matters when the app is hosted under a subpath
+// (e.g. GitHub Pages project sites).
+const ONIG_WASM_URL = `${process.env.NEXT_PUBLIC_BASE_PATH ?? ''}/onig.wasm`;
 
 let isVerseRegistered = false;
 let grammarPromise;

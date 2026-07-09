@@ -167,6 +167,20 @@ pnpm build      # IDE production build
 pnpm test:e2e   # Playwright end-to-end tests against the IDE
 ```
 
+### Deploying to GitHub Pages
+
+The app is fully static (no server components, no API routes), so it
+exports cleanly. `GITHUB_PAGES=true pnpm build` produces a static export
+in `out/` with the base path `/verse-js` and directory-style URLs;
+`.github/workflows/deploy-pages.yml` builds and publishes it on every
+push to `master` (enable Pages with source "GitHub Actions" in the repo
+settings). To smoke-test the export locally under the base path:
+
+```bash
+GITHUB_PAGES=true pnpm build
+node scripts/serve-pages.mjs   # http://localhost:3211/verse-js/
+```
+
 The editor seeds these example files:
 
 | File | Demonstrates |

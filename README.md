@@ -173,8 +173,9 @@ The app is fully static (no server components, no API routes), so it
 exports cleanly. `GITHUB_PAGES=true pnpm build` produces a static export
 in `out/` with the base path `/verse-js` and directory-style URLs;
 `.github/workflows/deploy-pages.yml` builds and publishes it on every
-push to `master` (enable Pages with source "GitHub Actions" in the repo
-settings). To smoke-test the export locally under the base path:
+push to `master`, enabling Pages automatically on its first run (no
+repo-settings step needed). To smoke-test the export locally under the
+base path:
 
 ```bash
 GITHUB_PAGES=true pnpm build

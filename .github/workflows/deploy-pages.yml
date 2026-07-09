@@ -22,6 +22,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Creates the Pages site on first run (no-op afterwards), so no
+      # manual "enable Pages" step is needed in the repo settings.
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
       - uses: pnpm/action-setup@v4
 
       - uses: actions/setup-node@v4

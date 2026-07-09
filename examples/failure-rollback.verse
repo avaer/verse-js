@@ -11,7 +11,7 @@ bank_device := class(creative_device):
 
     # Withdraws from the vault, but fails when it would overdraw.
     # The `set` below is journaled: on failure it is undone.
-    Withdraw(Amount : int)<decides> : logic =
+    Withdraw(Amount : int)<decides> : void =
         if (Balance := Vault[0]):
             set Vault[0] = Balance - Amount
         if (NewBalance := Vault[0]):

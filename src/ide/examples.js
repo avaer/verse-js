@@ -30,7 +30,7 @@ bank_device := class(creative_device):
 
     # Withdraws from the vault, but fails when it would overdraw.
     # The 'set' below is journaled: on failure it is undone.
-    Withdraw(Amount : int)<decides> : logic =
+    Withdraw(Amount : int)<decides> : void =
         if (Balance := Vault[0]):
             set Vault[0] = Balance - Amount
         if (NewBalance := Vault[0]):
@@ -87,6 +87,114 @@ dice_device := class(creative_device):
             Print("Lucky!")
         else:
             Print("Try again")
+`,
+
+	'shapes-classes.verse': `# Classes, interfaces-style overrides, enums, and dynamic casts.
+# Every shape is stored as the base class; X[S] casts back down.
+
+shape := class:
+    Area() : int = 0
+
+circle := class(shape):
+    Radius : int = 1
+    Area<override>() : int = 3 * Radius * Radius
+
+square := class(shape):
+    Side : int = 1
+    Area<override>() : int = Side * Side
+
+color := enum:
+    Red
+    Green
+    Blue
+
+NameOf(C : color) : string =
+    case (C):
+        color.Red => "red"
+        color.Green => "green"
+        _ => "blue"
+
+Shapes : []shape = array{circle{Radius := 2}, square{Side := 3}}
+for (S : Shapes):
+    if (C := circle[S]):
+        Print("circle with area {C.Area()}")
+    else if (Q := square[S]):
+        Print("square with area {Q.Area()}")
+
+Print("favorite color: {NameOf(color.Green)}")
+`,
+
+	'race-and-sync.verse': `using { /Fortnite.com/Devices }
+using { /Verse.org/Simulation }
+
+# Structured concurrency: race cancels the loser (running its defer),
+# sync waits for every clause, spawn returns an awaitable task.
+
+Fetch(Name : string, Seconds : float)<suspends> : string =
+    defer:
+        Print("{Name} cleaned up")
+    Sleep(Seconds)
+    Print("{Name} finished at {GetSimulationElapsedTime()}s")
+    Name
+
+concurrency_device := class(creative_device):
+    OnBegin<override>()<suspends> : void =
+        Winner := race:
+            Fetch("cache", 1.0)
+            Fetch("network", 5.0)
+        Print("race winner: {Winner}")
+
+        Results := sync:
+            Fetch("left", 1.0)
+            Fetch("right", 2.0)
+        Print("sync got {Results(0)} and {Results(1)} at {GetSimulationElapsedTime()}s")
+`,
+
+	'generics-options.verse': `# Parametric functions (where clauses), option types, and extension methods.
+
+# A generic function: works for any type t.
+FirstOr(Items : []t, Fallback : t where t : type) : t =
+    if (First := Items[0]) then First else Fallback
+
+# Extension methods add members to existing types.
+(X : int).Squared() : int = X * X
+(S : string).Shout() : string = S + "!"
+
+Names : []string = array{"alice", "bob"}
+Empty : []int = array{}
+
+Print(FirstOr(Names, "nobody"))
+Print("{FirstOr(Empty, -1)}")
+
+MaybeScore : ?int = option{7}
+if (Score := MaybeScore?):
+    Print("score is {Score.Squared()}")
+
+NoScore : ?int = false
+Message := if (S := NoScore?) then "{S}" else "no score yet"
+Print(Message.Shout())
+`,
+
+	'persistent-score.verse': `using { /Fortnite.com/Devices }
+using { /Verse.org/Simulation }
+using { /Verse.org/Random }
+
+# Module-scoped weak_map vars persist between runs (localStorage in this
+# IDE, durable player storage in UEFN). Run this a few times!
+
+var HighScore : weak_map(player, int) = map{}
+
+score_device := class(creative_device):
+    OnBegin<override>()<suspends> : void =
+        ThePlayer := GetLocalPlayer()
+        var Best : int = 0
+        if (Existing := HighScore[ThePlayer]):
+            set Best = Existing
+        Roll := GetRandomInt(1, 100)
+        Print("you rolled {Roll} (best so far: {Best})")
+        if (Roll > Best):
+            Print("new high score!")
+            if (set HighScore[ThePlayer] = Roll) {}
 `,
 };
 

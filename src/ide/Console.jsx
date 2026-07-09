@@ -53,6 +53,7 @@ export default function Console({ logs, onClear, onJumpTo }) {
 			<div
 				ref={scrollRef}
 				onScroll={handleScroll}
+				data-testid="console-output"
 				className="min-h-0 flex-1 overflow-y-auto px-3 py-1 font-mono text-[12px] leading-[1.5]"
 				style={{ fontFamily: "var(--font-geist-mono), Consolas, monospace" }}
 			>

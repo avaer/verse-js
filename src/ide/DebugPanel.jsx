@@ -13,7 +13,10 @@ const TASK_STATE_COLORS = {
 
 export default function DebugPanel({ variables, callStack, pausedLine, tasks }) {
 	return (
-		<div className="flex h-full min-h-0 flex-col overflow-hidden border-l border-[#2b2b2b] bg-[#181818]">
+		<div
+			data-testid="debug-panel"
+			className="flex h-full min-h-0 flex-col overflow-hidden border-l border-[#2b2b2b] bg-[#181818]"
+		>
 			<div className="flex h-8 shrink-0 items-center border-b border-[#2b2b2b] px-3 select-none">
 				<span className="text-[11px] font-semibold tracking-wider text-[#8a8a8a] uppercase">
 					Debug

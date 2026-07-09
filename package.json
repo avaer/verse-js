@@ -10,6 +10,7 @@
     "lint": "eslint",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:e2e": "playwright test",
     "bench": "tsx scripts/bench.mts"
   },
   "dependencies": {
@@ -22,6 +23,7 @@
     "vscode-textmate": "^9.3.2"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.1",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",

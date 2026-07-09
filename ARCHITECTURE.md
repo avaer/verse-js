@@ -148,17 +148,39 @@ integration point; run mode pays nothing for it.
 
 The compiler applies a set of static specializations on top of that:
 
-- **Sync-first combinators**: binary expressions, if-clauses, calls
-  (without named arguments), member reads, blocks, and argument lists
-  evaluate through loops/branches that allocate no continuation closures
-  on the all-synchronous path; promise continuations are only built when
-  an operand actually suspends.
+- **Sync-first combinators**: all expression combinators — binary, calls
+  (without named arguments), member reads, blocks, argument lists,
+  if/case arms, and/or/not/query, unary, tuple/map/range literals, and
+  archetypes — evaluate through loops/branches that allocate no
+  continuation closures on the all-synchronous path; promise
+  continuations are only built when an operand actually suspends.
 - **Transaction elision**: the checker watches each failure context for
-  the `writes` effect (direct `set`s and calls to writing functions) and
+  journal-relevant writes (an explicit observer stack fed by `set`s and,
+  conservatively, calls to functions whose effects include writes) and
   stamps the result on the node; read-only contexts compile to a plain
   fail-check with no `Transaction`. Writing contexts keep full
   journaling, and the journal's entries array is allocated lazily on the
   first recorded write.
+- **Context-local write elision**: a `set` to a local declared in the
+  same frame at the same failure-context depth skips journaling entirely
+  — any open transaction predates the slot, so rollback never needs to
+  restore it (the common case: locals of a `<decides>` function body).
+  Such writes also don't count toward transaction elision above, so
+  conditions that only mutate their own locals compile with no
+  transaction at all.
+- **Copy-on-write appends**: containers are uniqueness-tracked (a
+  WeakSet of possibly-aliased arrays/maps, marked at every store site
+  that can create a second reference, with fresh constructor results
+  exempt). `set X += array{...}` / map merges mutate in place while the
+  target is unaliased — O(1) instead of O(n) per append — journaled via
+  array-length / map-entry entries; aliased targets keep the copying
+  semantics.
+- **Inline caches + method-call fusion**: dynamic member sites carry a
+  per-site monomorphic cache keyed on class identity (classes are
+  immutable after compile, so no invalidation). `obj.Method(args)`
+  resolves through the cache and invokes with `self = obj` directly,
+  eliminating the per-call bound-function allocation; bare method reads
+  (`obj.Method` as a value) still bind.
 - **Operator specialization**: when both operand types are statically
   numeric (or both strings), operators compile to monomorphic
   implementations with no runtime type dispatch; int/int division keeps
@@ -174,9 +196,15 @@ The compiler applies a set of static specializations on top of that:
   logic/void, integral rationals) directly as JS Map keys; structural
   keys are canonicalized once and interned to per-map tokens (see
   Values).
+- **Batched persistence**: writes to persistable `weak_map`s mark the map
+  dirty and serialize once per microtask instead of re-serializing the
+  whole map on every `set`; the end-of-run flush drains anything still
+  pending, so `await run.done` always observes persisted state.
 
 Measured effect on the micro-benchmarks (`pnpm bench`, virtual clock,
-same machine; run time only — compile stayed ~1–5 ms throughout):
+same machine; run time only — compile stayed ~1–5 ms throughout).
+Optimization pass 1 (sync-first core, transaction elision, operator
+specialization, lazy ranges, call binding, two-tier keys):
 
 | bench                                | before   | after    |
 | ------------------------------------ | -------- | -------- |
@@ -185,6 +213,27 @@ same machine; run time only — compile stayed ~1–5 ms throughout):
 | map churn (20k inserts + lookups)    | 130.5 ms | 48.1 ms  |
 | failure contexts (100k rollbacks)    | 314.5 ms | 136.9 ms |
 | concurrency stress (2k tasks × 3)    | 24.3 ms  | 20.3 ms  |
+
+Optimization pass 2 (context-local elision, copy-on-write appends,
+inline caches / call fusion, remaining sync-first combinators, batched
+persistence):
+
+| bench                                | before   | after    |
+| ------------------------------------ | -------- | -------- |
+| array churn (10k)                    | 27.6 ms  | 6.1 ms   |
+| array append (100k, in-place) — new  | (O(n²))  | 12.4 ms  |
+| OO dispatch (200k calls) — new       | 87.7 ms  | 72.0 ms  |
+| fib / map churn / failure / conc.    | ~flat    | ~flat    |
+
+The copy-on-write change moved list building from quadratic to linear
+(the churn bench changed complexity class; 100k appends complete in
+~12 ms where copying took minutes). Inline caches were kept after
+measuring −18% on the OO dispatch bench (median of 12 in-process runs);
+the remaining benches were flat within noise. Context-local elision
+removed per-write journal entries but the failure-context bench is
+dominated by transaction setup and call overhead, so its headline
+number barely moved; the win shows up in conditions that only mutate
+their own locals, which now compile with no transaction at all.
 
 ### Values
 
@@ -210,7 +259,9 @@ mutation inside is journaled, and on failure the journal rolls back —
 modelled on VerseVM's transactional execution. Outside failure contexts
 writes go straight through; the happy path has no journaling cost.
 Contexts the checker proved read-only skip the transaction entirely (see
-Closure compilation), and the journal allocates lazily on first write.
+Closure compilation), the journal allocates lazily on first write, and
+writes to locals declared inside the same context skip journaling — the
+slot postdates every open transaction, so rollback never restores it.
 
 ### Concurrency
 

@@ -146,15 +146,60 @@ Debug builds (`{ debug: true }`) additionally weave a per-statement hook
 that awaits `DebugHooks.onStatement` — that's the entire debugger
 integration point; run mode pays nothing for it.
 
+The compiler applies a set of static specializations on top of that:
+
+- **Sync-first combinators**: binary expressions, if-clauses, calls
+  (without named arguments), member reads, blocks, and argument lists
+  evaluate through loops/branches that allocate no continuation closures
+  on the all-synchronous path; promise continuations are only built when
+  an operand actually suspends.
+- **Transaction elision**: the checker watches each failure context for
+  the `writes` effect (direct `set`s and calls to writing functions) and
+  stamps the result on the node; read-only contexts compile to a plain
+  fail-check with no `Transaction`. Writing contexts keep full
+  journaling, and the journal's entries array is allocated lazily on the
+  first recorded write.
+- **Operator specialization**: when both operand types are statically
+  numeric (or both strings), operators compile to monomorphic
+  implementations with no runtime type dispatch; int/int division keeps
+  exact quotients as plain numbers and only allocates a `VRational` for
+  fractional results.
+- **Lazy ranges**: `for (I := lo..hi)` iterates numerically without
+  materializing the range as an array; zero-filter loops skip the filter
+  and transaction machinery entirely.
+- **Call binding**: functions whose parameters are all positional with no
+  defaults bind arguments through a specialized fast path with no
+  per-parameter branching.
+- **Two-tier map keys**: `VMap` uses primitive keys (int/float/string/
+  logic/void, integral rationals) directly as JS Map keys; structural
+  keys are canonicalized once and interned to per-map tokens (see
+  Values).
+
+Measured effect on the micro-benchmarks (`pnpm bench`, virtual clock,
+same machine; run time only — compile stayed ~1–5 ms throughout):
+
+| bench                                | before   | after    |
+| ------------------------------------ | -------- | -------- |
+| fib(24) recursive                    | 218.3 ms | 120.5 ms |
+| array churn (10k, quadratic)         | 52.1 ms  | 27.6 ms  |
+| map churn (20k inserts + lookups)    | 130.5 ms | 48.1 ms  |
+| failure contexts (100k rollbacks)    | 314.5 ms | 136.9 ms |
+| concurrency stress (2k tasks × 3)    | 24.3 ms  | 20.3 ms  |
+
 ### Values
 
 `runtime/values.ts` defines the value model: JS numbers/strings/booleans
-for scalars, `VRational`, `VOption`, `VTuple`, `VMap` (insertion-ordered,
-structural keys via `canonicalKey`), `VObject`/`VStruct` (structs get
-value semantics — copied on assignment), `VFunctionValue` (bound methods),
-and first-class type values (`VTypeValue`, `RuntimeClass`,
-`NativeClassValue`) that serve as cast targets (`shape[X]`) and archetype
-constructors (`shape{...}`).
+for scalars, `VRational`, `VOption`, `VTuple`, `VMap`, `VObject`/`VStruct`
+(structs get value semantics — copied on assignment), `VFunctionValue`
+(bound methods), and first-class type values (`VTypeValue`,
+`RuntimeClass`, `NativeClassValue`) that serve as cast targets
+(`shape[X]`) and archetype constructors (`shape{...}`).
+
+`VMap` is insertion-ordered with two-tier structural keys: primitive keys
+are used directly as JS Map keys, while structural keys (arrays, tuples,
+options, structs, ...) are canonicalized via `canonicalKey` once and
+interned to a per-map token object, so equal-by-value keys hit the same
+entry and raw string keys can never collide with a structural encoding.
 
 ### Failure semantics and transactions
 
@@ -164,6 +209,8 @@ bodies, loop filters) open a `Transaction` (`runtime/failure.ts`): every
 mutation inside is journaled, and on failure the journal rolls back —
 modelled on VerseVM's transactional execution. Outside failure contexts
 writes go straight through; the happy path has no journaling cost.
+Contexts the checker proved read-only skip the transaction entirely (see
+Closure compilation), and the journal allocates lazily on first write.
 
 ### Concurrency
 

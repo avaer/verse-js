@@ -265,6 +265,10 @@ export class VObject {
 
 export class VStruct extends VObject {
 	copy(): VStruct {
+		// Both structs now reference the same field values.
+		for (const value of this.fields.values()) {
+			markShared(value);
+		}
 		return new VStruct(this.cls, new Map(this.fields));
 	}
 }
@@ -335,6 +339,31 @@ export interface VEventValue {
 	readonly isVerseEvent: true;
 	signal(payload: Value): void;
 	awaitSignal(): Promise<Value>;
+}
+
+// --- uniqueness tracking (copy-on-write containers) ---
+
+/**
+ * Containers (arrays, maps) that may be referenced from more than one
+ * place. `set X += ...` mutates in place only while the container is
+ * provably unaliased; once a second reference can exist the value is
+ * marked here and appends fall back to copying (Verse value semantics).
+ * Compiled code marks values at every site that can create a second
+ * reference: slot/global/field stores, container-literal elements,
+ * option values, archetype fields, and struct copies.
+ */
+const sharedValues = new WeakSet<object>();
+
+/** Marks a container as possibly-aliased. Safe to call on any value. */
+export function markShared(v: Value): void {
+	if (v !== null && typeof v === 'object' && (Array.isArray(v) || v instanceof VMap)) {
+		sharedValues.add(v);
+	}
+}
+
+/** True when the container may have more than one live reference. */
+export function isShared(v: object): boolean {
+	return sharedValues.has(v);
 }
 
 export function isTask(v: Value): v is VTask {

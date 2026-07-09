@@ -22,9 +22,10 @@ import {
 } from './failure';
 import { NativeEntry, NativeRegistry } from '../bindings/registry';
 import {
-	asRational, canonicalKey, FAIL, isTask, Value, VEnumValue, VTask,
-	verseEquals, verseFloatToString, verseToString, VFunctionValue, VMap,
-	VNativeFunction, VObject, VOption, VRational, VStruct, VTuple, VTypeValue,
+	asRational, canonicalKey, FAIL, isShared, isTask, markShared, Value,
+	VEnumValue, VTask, verseEquals, verseFloatToString, verseToString,
+	VFunctionValue, VMap, VNativeFunction, VObject, VOption, VRational,
+	VStruct, VTuple, VTypeValue,
 } from './values';
 
 export type Code = (env: Env, ctx: Ctx) => unknown;
@@ -51,8 +52,10 @@ export class RuntimeClass extends VTypeValue {
 	info: ClassInfo;
 	superClass: RuntimeClass | null = null;
 	isStruct: boolean;
-	/** Field initialization order including inherited fields. */
-	fieldOrder: { name: string; init: Code | null; frameSize: number }[] = [];
+	/** Field initialization order including inherited fields. `freshInit`
+	 *  means the default expression always builds a new container, so the
+	 *  instantiated field value needs no shared-marking. */
+	fieldOrder: { name: string; init: Code | null; frameSize: number; freshInit: boolean }[] = [];
 	methods: Map<string, VFunctionValue> = new Map();
 	blocks: { code: Code; frameSize: number }[] = [];
 
@@ -235,6 +238,8 @@ class Compiler {
 					frameSize: semaOf(d.value as Expr).frameSize ?? 0,
 					code,
 					isWeakMap: this.isPersistentWeakMap(d),
+					// Global slot store: a non-fresh RHS creates an alias.
+					mark: !producesFreshValue(d.value as Expr),
 				};
 			});
 		const compiledStatements = statements.map(({ file, stmt }) => {
@@ -297,6 +302,9 @@ class Compiler {
 					value = this.loadPersistentMap(ctx, init.name, value as Value);
 				}
 				if (init.slot >= 0) {
+					if (init.mark) {
+						markShared(value as Value);
+					}
 					// Structs have value semantics: copy on assignment so a
 					// global initialized from another global doesn't alias it.
 					globals[init.slot] = copyIfStruct(value as Value);
@@ -430,8 +438,9 @@ class Compiler {
 			} else if (member.kind === 'Definition' || member.kind === 'VarDefinition') {
 				const init = member.value ? this.compileExpr(member.value) : null;
 				const frameSize = member.value ? (semaOf(member.value).frameSize ?? 0) : 0;
+				const freshInit = member.value ? producesFreshValue(member.value) : true;
 				const existingIndex = rc.fieldOrder.findIndex((f) => f.name === member.name);
-				const entry = { name: member.name, init, frameSize };
+				const entry = { name: member.name, init, frameSize, freshInit };
 				if (existingIndex >= 0) {
 					rc.fieldOrder[existingIndex] = entry;
 				} else {
@@ -498,12 +507,18 @@ class Compiler {
 						if (value === FAIL) {
 							throw new VerseRuntimeError(`Field initializer for '${step.name}' failed`);
 						}
+						if (!step.freshInit) {
+							markShared(value as Value);
+						}
 						fields.set(step.name, value as Value);
 						return runStep(i + 1);
 					});
 				}
 				if (r === FAIL) {
 					throw new VerseRuntimeError(`Field initializer for '${step.name}' failed`);
+				}
+				if (!step.freshInit) {
+					markShared(r as Value);
 				}
 				fields.set(step.name, r as Value);
 			}
@@ -852,17 +867,19 @@ class Compiler {
 			case 'Block':
 				return this.compileBlock(expr);
 			case 'Tuple': {
-				const list = this.compileList(expr.elements);
+				const list = this.compileList(expr.elements, Compiler.embedMarks(expr.elements));
 				return (env, ctx) => chain(list(env, ctx), (values) =>
 					values === FAIL ? FAIL : new VTuple(values as Value[]));
 			}
 			case 'ArrayLit': {
-				const list = this.compileList(expr.elements);
+				const list = this.compileList(expr.elements, Compiler.embedMarks(expr.elements));
 				return (env, ctx) => list(env, ctx);
 			}
 			case 'MapLit': {
-				const keys = this.compileList(expr.entries.map((e) => e.key));
-				const values = this.compileList(expr.entries.map((e) => e.value));
+				const keyExprs = expr.entries.map((e) => e.key);
+				const valueExprs = expr.entries.map((e) => e.value);
+				const keys = this.compileList(keyExprs, Compiler.embedMarks(keyExprs));
+				const values = this.compileList(valueExprs, Compiler.embedMarks(valueExprs));
 				return (env, ctx) => chain(keys(env, ctx), (ks) => {
 					if (ks === FAIL) {
 						return FAIL;
@@ -883,8 +900,16 @@ class Compiler {
 				}
 				const inner = this.compileFailureContext(
 					[expr.value], true, semaOf(expr).contextWrites !== false);
-				return (env, ctx) => chain(inner(env, ctx), (r) =>
-					r === FAIL ? VOption.EMPTY : VOption.someAllowingUndefined(r as Value));
+				const mark = !producesFreshValue(expr.value);
+				return (env, ctx) => chain(inner(env, ctx), (r) => {
+					if (r === FAIL) {
+						return VOption.EMPTY;
+					}
+					if (mark) {
+						markShared(r as Value);
+					}
+					return VOption.someAllowingUndefined(r as Value);
+				});
 			}
 			case 'RangeExpr': {
 				const low = this.compileExpr(expr.low);
@@ -999,9 +1024,14 @@ class Compiler {
 				if (!value) {
 					return () => undefined;
 				}
+				// A slot store is a second reference unless the RHS is fresh.
+				const mark = !producesFreshValue(expr.value as Expr);
 				return (env, ctx) => chain(value(env, ctx), (v) => {
 					if (v === FAIL) {
 						return FAIL;
+					}
+					if (mark) {
+						markShared(v as Value);
 					}
 					env.slots[slot] = copyIfStruct(v as Value);
 					return undefined;
@@ -1013,9 +1043,13 @@ class Compiler {
 				if (this.fnCtx.names && slot >= 0) {
 					this.fnCtx.names[slot] = expr.name;
 				}
+				const mark = !producesFreshValue(expr.value);
 				return (env, ctx) => chain(value(env, ctx), (v) => {
 					if (v === FAIL) {
 						return FAIL;
+					}
+					if (mark) {
+						markShared(v as Value);
 					}
 					env.slots[slot] = copyIfStruct(v as Value);
 					return v;
@@ -1334,7 +1368,12 @@ class Compiler {
 	// Calls, members, archetypes
 	// =====================================================================
 
-	private compileList(exprs: Expr[]): (env: Env, ctx: Ctx) => unknown {
+	/**
+	 * `marks[i]` true means element i is embedded into a container the
+	 * caller builds, creating a second reference: mark it shared so
+	 * copy-on-write appends stop mutating it in place.
+	 */
+	private compileList(exprs: Expr[], marks: boolean[] | null = null): (env: Env, ctx: Ctx) => unknown {
 		const codes = exprs.map((e) => this.compileExpr(e));
 		return (env, ctx) => {
 			const out: Value[] = new Array(codes.length);
@@ -1346,12 +1385,18 @@ class Compiler {
 							return FAIL;
 						}
 						out[i] = first as Value;
+						if (marks?.[i]) {
+							markShared(out[i]);
+						}
 						for (let j = i + 1; j < codes.length; j++) {
 							const v = await codes[j](env, ctx);
 							if (v === FAIL) {
 								return FAIL;
 							}
 							out[j] = v as Value;
+							if (marks?.[j]) {
+								markShared(out[j]);
+							}
 						}
 						return out;
 					});
@@ -1360,9 +1405,19 @@ class Compiler {
 					return FAIL;
 				}
 				out[i] = r as Value;
+				if (marks !== null && marks[i]) {
+					markShared(out[i]);
+				}
 			}
 			return out;
 		};
+	}
+
+	/** Per-element shared-marking flags for container construction, or
+	 *  null when every element is provably fresh (nothing to mark). */
+	private static embedMarks(exprs: Expr[]): boolean[] | null {
+		const marks = exprs.map((e) => !producesFreshValue(e));
+		return marks.some(Boolean) ? marks : null;
 	}
 
 	private compileCall(expr: Call): Code {
@@ -1556,7 +1611,9 @@ class Compiler {
 		}
 		const callee = this.compileExpr(expr.callee);
 		const fieldNames = expr.fields.map((f) => f.name);
-		const fieldValues = this.compileList(expr.fields.map((f) => f.value));
+		const fieldExprs = expr.fields.map((f) => f.value);
+		// Field stores embed the value into the new object.
+		const fieldValues = this.compileList(fieldExprs, Compiler.embedMarks(fieldExprs));
 		const bodyValues = this.compileList(expr.body);
 		const line = expr.span.start.line;
 
@@ -1605,6 +1662,15 @@ class Compiler {
 		const line = stmt.span.start.line;
 		const target = stmt.target;
 
+		// `set X = <existing value>` creates a second reference.
+		const markAssign = op === '=' && !producesFreshValue(stmt.value);
+
+		// `set X += ...` on an array/map target appends in place when the
+		// container is unaliased (see appendInPlace). Gated on the static
+		// type so numeric compound assignments skip the container checks.
+		const inPlaceForType = (t: VType | undefined): boolean =>
+			op === '+=' && (!t || t.k === 'array' || t.k === 'map' || t.k === 'unknown');
+
 		const applyOp = (oldValue: Value, newValue: Value): Value => {
 			if (op === '=') {
 				return copyIfStruct(newValue);
@@ -1625,7 +1691,10 @@ class Compiler {
 				const slot = binding.slot;
 				// Locals declared at the same failure depth postdate any open
 				// transaction; rollback never restores them, so skip the journal.
+				// (An unshared container in such a slot also postdates it, so
+				// in-place appends skip length journaling too.)
 				const journal = !semaOf(stmt).contextLocalWrite;
+				const tryInPlace = inPlaceForType(binding.type);
 				return (env, ctx) => chain(value(env, ctx), (v) => {
 					if (v === FAIL) {
 						return FAIL;
@@ -1634,8 +1703,17 @@ class Compiler {
 					for (let i = 0; i < depth; i++) {
 						e = e.parent as Env;
 					}
+					if (tryInPlace) {
+						const appended = appendInPlace(e.slots[slot], v as Value, journal ? ctx.txn : null);
+						if (appended !== null) {
+							return appended;
+						}
+					}
 					if (journal && ctx.txn) {
 						ctx.txn.recordSlot(e.slots, slot);
+					}
+					if (markAssign) {
+						markShared(v as Value);
 					}
 					e.slots[slot] = op === '=' ? copyIfStruct(v as Value) : applyOp(e.slots[slot], v as Value);
 					return e.slots[slot];
@@ -1643,13 +1721,24 @@ class Compiler {
 			}
 			if (binding?.kind === 'global') {
 				const slot = binding.slot;
+				const tryInPlace = inPlaceForType(binding.type);
 				return (env, ctx) => chain(value(env, ctx), (v) => {
 					if (v === FAIL) {
 						return FAIL;
 					}
 					const globals = ctx.shared.globals;
+					if (tryInPlace) {
+						const appended = appendInPlace(globals[slot], v as Value, ctx.txn);
+						if (appended !== null) {
+							persistIfNeeded(ctx, appended);
+							return appended;
+						}
+					}
 					if (ctx.txn) {
 						ctx.txn.recordSlot(globals, slot);
+					}
+					if (markAssign) {
+						markShared(v as Value);
 					}
 					globals[slot] = op === '=' ? copyIfStruct(v as Value) : applyOp(globals[slot], v as Value);
 					persistIfNeeded(ctx, globals[slot]);
@@ -1658,6 +1747,7 @@ class Compiler {
 			}
 			if (binding?.kind === 'member') {
 				const name = binding.name;
+				const tryInPlace = inPlaceForType(binding.type);
 				return (env, ctx) => chain(value(env, ctx), (v) => {
 					if (v === FAIL) {
 						return FAIL;
@@ -1666,8 +1756,17 @@ class Compiler {
 					if (!(self instanceof VObject)) {
 						throw new VerseRuntimeError(`Cannot assign '${name}' without Self`, line);
 					}
+					if (tryInPlace) {
+						const appended = appendInPlace(self.fields.get(name), v as Value, ctx.txn);
+						if (appended !== null) {
+							return appended;
+						}
+					}
 					if (ctx.txn) {
 						ctx.txn.recordField(self, name);
+					}
+					if (markAssign) {
+						markShared(v as Value);
 					}
 					const next = op === '=' ? copyIfStruct(v as Value) : applyOp(self.fields.get(name), v as Value);
 					self.fields.set(name, next);
@@ -1682,6 +1781,7 @@ class Compiler {
 		if (target.kind === 'Member') {
 			const object = this.compileExpr(target.target);
 			const name = target.name;
+			const tryInPlace = inPlaceForType(semaOf(target).type);
 			return (env, ctx) => chain(object(env, ctx), (o) => {
 				if (o === FAIL) {
 					return FAIL;
@@ -1693,8 +1793,17 @@ class Compiler {
 					if (!(o instanceof VObject)) {
 						throw new VerseRuntimeError(`Cannot assign member '${name}' of a non-object`, line);
 					}
+					if (tryInPlace) {
+						const appended = appendInPlace(o.fields.get(name), v as Value, ctx.txn);
+						if (appended !== null) {
+							return appended;
+						}
+					}
 					if (ctx.txn) {
 						ctx.txn.recordField(o, name);
+					}
+					if (markAssign) {
+						markShared(v as Value);
 					}
 					const next = op === '=' ? copyIfStruct(v as Value) : applyOp(o.fields.get(name), v as Value);
 					o.fields.set(name, next);
@@ -1726,12 +1835,18 @@ class Compiler {
 							if (ctx.txn) {
 								ctx.txn.recordElem(c, idx);
 							}
+							if (markAssign) {
+								markShared(v as Value);
+							}
 							c[idx] = op === '=' ? copyIfStruct(v as Value) : applyOp(c[idx], v as Value);
 							return c[idx];
 						}
 						if (c instanceof VMap) {
 							if (ctx.txn) {
 								ctx.txn.recordMapEntry(c, i as Value);
+							}
+							if (markAssign) {
+								markShared(v as Value);
 							}
 							const old = c.get(i as Value);
 							const next = op === '=' ? copyIfStruct(v as Value) : applyOp(old === FAIL ? undefined : old, v as Value);
@@ -1915,6 +2030,8 @@ class Compiler {
 		// them read-only — there is nothing to roll back on a failing filter.
 		const filtersCanWrite = filters.length > 0 && semaOf(expr).contextWrites !== false;
 		const body = this.compileStatement(expr.body);
+		// Collected body values are embedded into the result array.
+		const markBody = !discardResults && !producesFreshValue(expr.body);
 		const line = expr.span.start.line;
 
 		return (env, ctx) => {
@@ -2000,6 +2117,9 @@ class Compiler {
 				const b = body(env, ctx);
 				return chain(b, (value) => {
 					if (!discardResults && value !== FAIL) {
+						if (markBody) {
+							markShared(value as Value);
+						}
 						results.push(value as Value);
 					}
 					return undefined;
@@ -2183,6 +2303,30 @@ function rootOf(env: Env): Env {
 
 function copyIfStruct(v: Value): Value {
 	return v instanceof VStruct ? v.copy() : v;
+}
+
+/**
+ * True when the expression always evaluates to a brand-new value (or a
+ * value that cannot be a container), so storing its result can never
+ * create a second reference to an existing array/map. Store sites use
+ * this to skip `markShared`, keeping fresh containers eligible for
+ * in-place (copy-on-write) appends.
+ */
+function producesFreshValue(expr: Expr): boolean {
+	switch (expr.kind) {
+		case 'ArrayLit':
+		case 'MapLit':
+		case 'RangeExpr':
+		case 'ForExpr':
+		case 'IntLit':
+		case 'FloatLit':
+		case 'CharLit':
+		case 'LogicLit':
+		case 'StringLit':
+			return true;
+		default:
+			return false;
+	}
 }
 
 function primitiveCast(name: string): VTypeValue | null {
@@ -2376,6 +2520,38 @@ function selectBinaryOp(
 			break;
 	}
 	return (l, r) => applyBinary(op, l, r, line);
+}
+
+/**
+ * In-place `set X += v` for an unaliased container target. Returns the
+ * mutated container, or null when the fast path doesn't apply (aliased
+ * target or non-container operands) and the caller must fall back to the
+ * copying path. Journals the old length/entries through `txn` so a
+ * rollback still restores the container.
+ */
+function appendInPlace(cur: Value, v: Value, txn: Transaction | null): Value | null {
+	if (Array.isArray(cur) && Array.isArray(v) && !isShared(cur)) {
+		if (txn) {
+			txn.recordArrayLength(cur);
+		}
+		const n = v.length; // snapshot: v may alias cur (set X += X)
+		for (let k = 0; k < n; k++) {
+			cur.push(v[k]);
+		}
+		return cur;
+	}
+	if (cur instanceof VMap && v instanceof VMap && !isShared(cur)) {
+		if (txn) {
+			for (const [k] of v.pairs()) {
+				txn.recordMapEntry(cur, k);
+			}
+		}
+		for (const [k, val] of v.pairs()) {
+			cur.set(k, val);
+		}
+		return cur;
+	}
+	return null;
 }
 
 function applyBinary(op: string, l: Value, r: Value, line: number): Value | typeof FAIL {

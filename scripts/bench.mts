@@ -27,9 +27,10 @@ Print("{Fib(24)}")
 `,
 	},
 	{
-		// Appending to an array is O(n) (value semantics), so this is
-		// intentionally quadratic; it measures array copy throughput.
-		name: 'array churn (build + sum 10k, quadratic)',
+		// Unaliased appends run in place (copy-on-write uniqueness
+		// tracking), so this is O(n) now; it measures append + sum
+		// throughput. (It was quadratic when every += copied.)
+		name: 'array churn (build + sum 10k)',
 		expect: /^333383335000$/,
 		source: `
 var Items : []int = array{}
@@ -39,6 +40,18 @@ var Total : int = 0
 for (X : Items):
     set Total += X
 Print("{Total}")
+`,
+	},
+	{
+		// In-place append fast path at scale; quadratic copying would
+		// take minutes here.
+		name: 'array append (100k, in-place)',
+		expect: /^100000$/,
+		source: `
+var Items : []int = array{}
+for (I := 1..100000):
+    set Items += array{I}
+Print("{Items.Length}")
 `,
 	},
 	{

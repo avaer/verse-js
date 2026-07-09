@@ -64,6 +64,50 @@ function queryValue(v: unknown): unknown {
 	throw new VerseRuntimeError("'?' applied to a value that is not an option or logic");
 }
 
+/** `return e` continuation, hoisted so return sites allocate no closure. */
+function throwReturn(v: unknown): unknown {
+	if (v === FAIL) {
+		return FAIL;
+	}
+	throw new ReturnSignal(v as Value);
+}
+
+/** Async rejection handler translating `return` unwinds into values. */
+function unwrapReturnSignal(error: unknown): unknown {
+	if (error instanceof ReturnSignal) {
+		return error.value;
+	}
+	throw error;
+}
+
+/**
+ * True when a value of this static type could be a `VStruct` at runtime,
+ * in which case parameter binding must make a defensive copy (structs have
+ * value semantics). Primitive/container/function types can never be
+ * structs, so their params skip the per-call instanceof check.
+ */
+function typeMayBeStruct(t: VType | undefined): boolean {
+	if (!t) {
+		return true;
+	}
+	switch (t.k) {
+		case 'int': case 'float': case 'rational': case 'logic':
+		case 'char': case 'char32': case 'string': case 'void':
+		case 'option': case 'array': case 'map': case 'tuple':
+		case 'func': case 'enum': case 'never': case 'type': case 'typeValue':
+			return false;
+		case 'class':
+			// Structs and interfaces (a struct may implement one); plain
+			// classes can't be extended by structs.
+			return t.info.kind !== 'class';
+		case 'union':
+			return t.members.some(typeMayBeStruct);
+		default:
+			// any / unknown / comparable / typeParam: assume the worst.
+			return true;
+	}
+}
+
 /** Runtime class object: also a first-class type value (cast target). */
 export class RuntimeClass extends VTypeValue {
 	info: ClassInfo;
@@ -603,12 +647,37 @@ class Compiler {
 		const isSimple = params.every((p) => !p.named && !p.defaultCode);
 		const paramSlots = params.map((p) => p.slot);
 		const paramCount = params.length;
+		// Struct params need a defensive copy (value semantics); params whose
+		// static type can never hold a struct skip the instanceof check.
+		const fnParams = fnType && fnType.k === 'func' ? fnType.params : null;
+		const anyStructParam = !fnParams ||
+			fnParams.some((p) => typeMayBeStruct(p.type)) ||
+			fnParams.length !== paramCount;
 
-		return (captureEnv: Env) => {
-			const runBody = (env: Env, ctx: Ctx): unknown => {
-				if (!body) {
-					return undefined;
+		// The body runner doesn't depend on the capture environment, so it is
+		// built once per definition rather than per closure value. The simple
+		// variant (no branch scope, no debug hooks) also avoids the per-call
+		// `finish` closure.
+		let runBody: (env: Env, ctx: Ctx) => unknown;
+		if (!body) {
+			runBody = () => undefined;
+		} else if (!debug && !hasBranch) {
+			runBody = (env: Env, ctx: Ctx): unknown => {
+				try {
+					const r = body(env, ctx);
+					if (isPromise(r)) {
+						return r.catch(unwrapReturnSignal);
+					}
+					return r;
+				} catch (error) {
+					if (error instanceof ReturnSignal) {
+						return error.value;
+					}
+					throw error;
 				}
+			};
+		} else {
+			runBody = (env: Env, ctx: Ctx): unknown => {
 				if (debug && ctx.shared.debug) {
 					ctx.shared.debug.onEnterFunction(fnName, line, file);
 				}
@@ -650,7 +719,9 @@ class Compiler {
 					throw error;
 				}
 			};
+		}
 
+		return (captureEnv: Env) => {
 			const simpleInvoke = (self: Value, args: Value[], ctx: Ctx): unknown => {
 				if (ctx.shared.scheduler.runCancelled) {
 					ctx.task.throwIfCancelled();
@@ -658,14 +729,20 @@ class Compiler {
 				const slots = new Array(frameSize);
 				// Tuple splat: F(T) where T matches multiple params.
 				let positional = args;
-				if (positional.length === 1 && paramCount > 1 && positional[0] instanceof VTuple) {
+				if (paramCount > 1 && positional.length === 1 && positional[0] instanceof VTuple) {
 					positional = (positional[0] as VTuple).elements;
 				}
 				if (positional.length < paramCount) {
 					throw new VerseRuntimeError(`Too few arguments calling '${fnName}'`);
 				}
-				for (let i = 0; i < paramCount; i++) {
-					slots[paramSlots[i]] = copyIfStruct(positional[i]);
+				if (anyStructParam) {
+					for (let i = 0; i < paramCount; i++) {
+						slots[paramSlots[i]] = copyIfStruct(positional[i]);
+					}
+				} else {
+					for (let i = 0; i < paramCount; i++) {
+						slots[paramSlots[i]] = positional[i];
+					}
 				}
 				if (selfSlot !== undefined) {
 					slots[selfSlot] = self;
@@ -742,12 +819,17 @@ class Compiler {
 	// Statements & blocks
 	// =====================================================================
 
-	compileStatement(stmt: Expr, discardValue = false): Code {
+	/** The statement's code without the line-stamp/fail-check wrapper. */
+	private compileStatementInner(stmt: Expr, discardValue: boolean): Code {
 		// Statement-position `for` loops don't collect their per-iteration
 		// results (which would retain every value produced in a long loop).
-		const inner = discardValue && stmt.kind === 'ForExpr'
+		return discardValue && stmt.kind === 'ForExpr'
 			? this.compileFor(stmt, true)
 			: this.compileExpr(stmt);
+	}
+
+	compileStatement(stmt: Expr, discardValue = false): Code {
+		const inner = this.compileStatementInner(stmt, discardValue);
 		const line = stmt.span.start.line;
 		const file = this.currentFile;
 		const failSoft = this.fnCtx.failSoft;
@@ -778,20 +860,66 @@ class Compiler {
 
 	private compileBlock(block: Block): Code {
 		const hasDefer = block.exprs.some((e) => e.kind === 'DeferExpr');
-		// Only the last statement's value can become the block's value.
-		const stmts = block.exprs.map((e, i) =>
-			this.compileStatement(e, i < block.exprs.length - 1));
 		const failSoft = this.fnCtx.failSoft;
+
+		if (this.debug) {
+			// Debug builds keep the per-statement wrapper (it hosts the
+			// onStatement hook).
+			const stmts = block.exprs.map((e, i) =>
+				this.compileStatement(e, i < block.exprs.length - 1));
+			const runSeq = (env: Env, ctx: Ctx): unknown => {
+				let last: unknown = undefined;
+				for (let i = 0; i < stmts.length; i++) {
+					const r = stmts[i](env, ctx);
+					if (isPromise(r)) {
+						return r.then((first) => runRest(first, i + 1, env, ctx));
+					}
+					if (r === FAIL) {
+						return failSoft ? FAIL : last;
+					}
+					last = r;
+				}
+				return last;
+			};
+			const runRest = async (first: unknown, start: number, env: Env, ctx: Ctx): Promise<unknown> => {
+				let last: unknown = first;
+				if (last === FAIL && failSoft) {
+					return FAIL;
+				}
+				for (let i = start; i < stmts.length; i++) {
+					const r = await stmts[i](env, ctx);
+					if (r === FAIL) {
+						return failSoft ? FAIL : last;
+					}
+					last = r;
+				}
+				return last;
+			};
+			return this.wrapDefers(runSeq, hasDefer);
+		}
+
+		// Run mode: the statement wrapper (line/file stamp + fail check) is
+		// fused into the block loop — no per-statement wrapper call.
+		// Only the last statement's value can become the block's value.
+		const inners = block.exprs.map((e, i) =>
+			this.compileStatementInner(e, i < block.exprs.length - 1));
+		const lines = block.exprs.map((e) => e.span.start.line);
+		const file = this.currentFile;
 
 		const runSeq = (env: Env, ctx: Ctx): unknown => {
 			let last: unknown = undefined;
-			for (let i = 0; i < stmts.length; i++) {
-				const r = stmts[i](env, ctx);
+			for (let i = 0; i < inners.length; i++) {
+				ctx.line = lines[i];
+				ctx.file = file;
+				const r = inners[i](env, ctx);
 				if (isPromise(r)) {
 					return r.then((first) => runRest(first, i + 1, env, ctx));
 				}
 				if (r === FAIL) {
-					return failSoft ? FAIL : last;
+					if (!failSoft) {
+						throw new VerseRuntimeError('Expression failed outside a failure context', lines[i]);
+					}
+					return FAIL;
 				}
 				last = r;
 			}
@@ -799,19 +927,30 @@ class Compiler {
 		};
 		const runRest = async (first: unknown, start: number, env: Env, ctx: Ctx): Promise<unknown> => {
 			let last: unknown = first;
-			if (last === FAIL && failSoft) {
+			if (last === FAIL) {
+				if (!failSoft) {
+					throw new VerseRuntimeError('Expression failed outside a failure context', lines[start - 1]);
+				}
 				return FAIL;
 			}
-			for (let i = start; i < stmts.length; i++) {
-				const r = await stmts[i](env, ctx);
+			for (let i = start; i < inners.length; i++) {
+				ctx.line = lines[i];
+				ctx.file = file;
+				const r = await inners[i](env, ctx);
 				if (r === FAIL) {
-					return failSoft ? FAIL : last;
+					if (!failSoft) {
+						throw new VerseRuntimeError('Expression failed outside a failure context', lines[i]);
+					}
+					return FAIL;
 				}
 				last = r;
 			}
 			return last;
 		};
+		return this.wrapDefers(runSeq, hasDefer);
+	}
 
+	private wrapDefers(runSeq: Code, hasDefer: boolean): Code {
 		if (!hasDefer) {
 			return runSeq;
 		}
@@ -1073,8 +1212,17 @@ class Compiler {
 			case 'Index': {
 				const target = this.compileExpr(expr.target);
 				const index = this.compileExpr(expr.index);
-				return (env, ctx) => chain(target(env, ctx), (t) =>
-					chain(index(env, ctx), (i) => indexValue(t as Value, i as Value)));
+				return (env, ctx) => {
+					const t = target(env, ctx);
+					if (isPromise(t)) {
+						return t.then((tv) => chain(index(env, ctx), (i) => indexValue(tv as Value, i as Value)));
+					}
+					const i = index(env, ctx);
+					if (isPromise(i)) {
+						return i.then((iv) => indexValue(t as Value, iv as Value));
+					}
+					return indexValue(t as Value, i as Value);
+				};
 			}
 			case 'Member':
 				return this.compileMember(expr);
@@ -1092,7 +1240,9 @@ class Compiler {
 				}
 				// A slot store is a second reference unless the RHS is fresh.
 				const mark = !producesFreshValue(expr.value as Expr);
-				return (env, ctx) => chain(value(env, ctx), (v) => {
+				// Per-site store helper: allocated once at compile time, so
+				// the synchronous path allocates no continuation closure.
+				const store = (v: unknown, env: Env): unknown => {
 					if (v === FAIL) {
 						return FAIL;
 					}
@@ -1101,7 +1251,11 @@ class Compiler {
 					}
 					env.slots[slot] = copyIfStruct(v as Value);
 					return undefined;
-				});
+				};
+				return (env, ctx) => {
+					const r = value(env, ctx);
+					return isPromise(r) ? r.then((v) => store(v, env)) : store(r, env);
+				};
 			}
 			case 'Assignment': {
 				const slot = semaOf(expr).slot ?? -1;
@@ -1110,7 +1264,7 @@ class Compiler {
 					this.fnCtx.names[slot] = expr.name;
 				}
 				const mark = !producesFreshValue(expr.value);
-				return (env, ctx) => chain(value(env, ctx), (v) => {
+				const store = (v: unknown, env: Env): unknown => {
 					if (v === FAIL) {
 						return FAIL;
 					}
@@ -1119,7 +1273,11 @@ class Compiler {
 					}
 					env.slots[slot] = copyIfStruct(v as Value);
 					return v;
-				});
+				};
+				return (env, ctx) => {
+					const r = value(env, ctx);
+					return isPromise(r) ? r.then((v) => store(v, env)) : store(r, env);
+				};
 			}
 			case 'SetExpr':
 				return this.compileSet(expr);
@@ -1157,12 +1315,13 @@ class Compiler {
 				if (!value) {
 					return () => { throw new ReturnSignal(undefined); };
 				}
-				return (env, ctx) => chain(value(env, ctx), (v) => {
-					if (v === FAIL) {
-						return FAIL;
+				return (env, ctx) => {
+					const r = value(env, ctx);
+					if (isPromise(r)) {
+						return r.then(throwReturn);
 					}
-					throw new ReturnSignal(v as Value);
-				});
+					return throwReturn(r);
+				};
 			}
 			case 'DeferExpr': {
 				const body = this.compileExpr(expr.body);
@@ -1914,7 +2073,9 @@ class Compiler {
 				// in-place appends skip length journaling too.)
 				const journal = !semaOf(stmt).contextLocalWrite;
 				const tryInPlace = inPlaceForType(binding.type);
-				return (env, ctx) => chain(value(env, ctx), (v) => {
+				// Per-site assign helper (compile-time): the sync path
+				// allocates no continuation closure.
+				const assign = (v: unknown, env: Env, ctx: Ctx): unknown => {
 					if (v === FAIL) {
 						return FAIL;
 					}
@@ -1936,12 +2097,16 @@ class Compiler {
 					}
 					e.slots[slot] = op === '=' ? copyIfStruct(v as Value) : applyOp(e.slots[slot], v as Value);
 					return e.slots[slot];
-				});
+				};
+				return (env, ctx) => {
+					const r = value(env, ctx);
+					return isPromise(r) ? r.then((v) => assign(v, env, ctx)) : assign(r, env, ctx);
+				};
 			}
 			if (binding?.kind === 'global') {
 				const slot = binding.slot;
 				const tryInPlace = inPlaceForType(binding.type);
-				return (env, ctx) => chain(value(env, ctx), (v) => {
+				const assign = (v: unknown, ctx: Ctx): unknown => {
 					if (v === FAIL) {
 						return FAIL;
 					}
@@ -1962,12 +2127,16 @@ class Compiler {
 					globals[slot] = op === '=' ? copyIfStruct(v as Value) : applyOp(globals[slot], v as Value);
 					persistIfNeeded(ctx, globals[slot]);
 					return globals[slot];
-				});
+				};
+				return (env, ctx) => {
+					const r = value(env, ctx);
+					return isPromise(r) ? r.then((v) => assign(v, ctx)) : assign(r, ctx);
+				};
 			}
 			if (binding?.kind === 'member') {
 				const name = binding.name;
 				const tryInPlace = inPlaceForType(binding.type);
-				return (env, ctx) => chain(value(env, ctx), (v) => {
+				const assign = (v: unknown, env: Env, ctx: Ctx): unknown => {
 					if (v === FAIL) {
 						return FAIL;
 					}
@@ -1990,7 +2159,11 @@ class Compiler {
 					const next = op === '=' ? copyIfStruct(v as Value) : applyOp(self.fields.get(name), v as Value);
 					self.fields.set(name, next);
 					return next;
-				});
+				};
+				return (env, ctx) => {
+					const r = value(env, ctx);
+					return isPromise(r) ? r.then((v) => assign(v, env, ctx)) : assign(r, env, ctx);
+				};
 			}
 			return () => {
 				throw new VerseRuntimeError('Invalid assignment target', line);
@@ -2096,60 +2269,52 @@ class Compiler {
 	private compileFailureContext(exprs: Expr[], commitOnSuccess: boolean, canWrite = true): Code {
 		const codes = exprs.map((e) => this.compileExpr(e));
 		if (!canWrite) {
+			// Sync path allocates nothing; the async tail is a hoisted helper.
 			return (env, ctx) => {
-				const runFrom = (index: number, last: unknown): unknown => {
-					for (let i = index; i < codes.length; i++) {
-						const r = codes[i](env, ctx);
-						if (isPromise(r)) {
-							return r.then((v) => (v === FAIL ? FAIL : runFrom(i + 1, v)));
-						}
-						if (r === FAIL) {
-							return FAIL;
-						}
-						last = r;
+				let last: unknown = undefined;
+				for (let i = 0; i < codes.length; i++) {
+					const r = codes[i](env, ctx);
+					if (isPromise(r)) {
+						return runCodesAsync(r, codes, i + 1, env, ctx);
 					}
-					return last;
-				};
-				return runFrom(0, undefined);
+					if (r === FAIL) {
+						return FAIL;
+					}
+					last = r;
+				}
+				return last;
 			};
 		}
 		return (env, ctx) => {
 			const saved = ctx.txn;
 			const txn = new Transaction(saved);
 			ctx.txn = txn;
-			const finish = (r: unknown): unknown => {
-				ctx.txn = saved;
-				if (r === FAIL) {
-					txn.rollback();
-					return FAIL;
-				}
-				if (commitOnSuccess) {
-					txn.commit();
-				} else {
-					txn.rollback();
-				}
-				return r;
-			};
-			const runFrom = (index: number, last: unknown): unknown => {
-				for (let i = index; i < codes.length; i++) {
+			let last: unknown = undefined;
+			try {
+				for (let i = 0; i < codes.length; i++) {
 					const r = codes[i](env, ctx);
 					if (isPromise(r)) {
-						return r.then((v) => (v === FAIL ? finish(FAIL) : runFrom(i + 1, v)));
+						return finishContextAsync(r, codes, i + 1, env, ctx, saved, txn, commitOnSuccess);
 					}
 					if (r === FAIL) {
-						return finish(FAIL);
+						ctx.txn = saved;
+						txn.rollback();
+						return FAIL;
 					}
 					last = r;
 				}
-				return finish(last);
-			};
-			try {
-				return runFrom(0, undefined);
 			} catch (error) {
 				ctx.txn = saved;
 				txn.rollback();
 				throw error;
 			}
+			ctx.txn = saved;
+			if (commitOnSuccess) {
+				txn.commit();
+			} else {
+				txn.rollback();
+			}
+			return last;
 		};
 	}
 
@@ -2162,24 +2327,23 @@ class Compiler {
 		}));
 		const elseBody = expr.elseBody ? this.compileExpr(expr.elseBody) : null;
 
+		// Sync-first: iterate clauses in a loop with no per-eval closure;
+		// the promise continuation is only built when a condition suspends.
 		return (env, ctx) => {
-			// Sync-first: iterate clauses in a loop; only fall back to a
-			// promise continuation when a condition actually suspends.
-			const tryClause = (index: number): unknown => {
-				for (let i = index; i < clauses.length; i++) {
-					const clause = clauses[i];
-					const r = clause.conditions(env, ctx);
-					if (isPromise(r)) {
-						return r.then((result) =>
-							result === FAIL ? tryClause(i + 1) : clause.body(env, ctx));
-					}
-					if (r !== FAIL) {
-						return clause.body(env, ctx);
-					}
+			for (let i = 0; i < clauses.length; i++) {
+				const clause = clauses[i];
+				const r = clause.conditions(env, ctx);
+				if (isPromise(r)) {
+					return r.then((result) =>
+						result === FAIL
+							? tryClausesAsync(clauses, elseBody, i + 1, env, ctx)
+							: clause.body(env, ctx));
 				}
-				return elseBody ? elseBody(env, ctx) : undefined;
-			};
-			return tryClause(0);
+				if (r !== FAIL) {
+					return clause.body(env, ctx);
+				}
+			}
+			return elseBody ? elseBody(env, ctx) : undefined;
 		};
 	}
 
@@ -2262,6 +2426,90 @@ class Compiler {
 		const markBody = !discardResults && !producesFreshValue(expr.body);
 		const line = expr.span.start.line;
 
+		// Fast path for the dominant shape `for (I := lo..hi): body` (single
+		// range generator, no filters): a plain numeric loop with no
+		// generator bookkeeping and no per-iteration closures.
+		if (generators.length === 1 && generators[0].range !== null && filters.length === 0) {
+			const { low, high } = generators[0].range;
+			const slot = generators[0].slot;
+			const collect = !discardResults;
+
+			const finishRangeAsync = async (
+				pending: unknown, v: number, hi: number, env: Env, ctx: Ctx, results: Value[] | null,
+			): Promise<unknown> => {
+				try {
+					for (;;) {
+						const r = isPromise(pending) ? await pending : pending;
+						if (results && r !== FAIL) {
+							if (markBody) {
+								markShared(r as Value);
+							}
+							results.push(r as Value);
+						}
+						v += 1;
+						if (v > hi) {
+							break;
+						}
+						env.slots[slot] = v;
+						pending = body(env, ctx);
+					}
+				} catch (error) {
+					if (!(error instanceof BreakSignal)) {
+						throw error;
+					}
+				}
+				return results ?? undefined;
+			};
+
+			const runRange = (lo: number, hi: number, env: Env, ctx: Ctx): unknown => {
+				const results: Value[] | null = collect ? [] : null;
+				try {
+					for (let v = lo; v <= hi; v++) {
+						env.slots[slot] = v;
+						const r = body(env, ctx);
+						if (isPromise(r)) {
+							return finishRangeAsync(r, v, hi, env, ctx, results);
+						}
+						if (results && r !== FAIL) {
+							if (markBody) {
+								markShared(r as Value);
+							}
+							results.push(r as Value);
+						}
+					}
+				} catch (error) {
+					if (!(error instanceof BreakSignal)) {
+						throw error;
+					}
+				}
+				return results ?? undefined;
+			};
+
+			const skipped = (): unknown => (collect ? [] : undefined);
+
+			return (env, ctx) => {
+				const lo = low(env, ctx);
+				if (isPromise(lo)) {
+					return lo.then((l) => l === FAIL
+						? skipped()
+						: chain(high(env, ctx), (h) =>
+							h === FAIL ? skipped() : runRange(l as number, h as number, env, ctx)));
+				}
+				if (lo === FAIL) {
+					return skipped();
+				}
+				const hi = high(env, ctx);
+				if (isPromise(hi)) {
+					return hi.then((h) =>
+						h === FAIL ? skipped() : runRange(lo as number, h as number, env, ctx));
+				}
+				if (hi === FAIL) {
+					return skipped();
+				}
+				return runRange(lo as number, hi as number, env, ctx);
+			};
+		}
+
 		return (env, ctx) => {
 			const results: Value[] = [];
 
@@ -2341,17 +2589,20 @@ class Compiler {
 				return iterate(0);
 			};
 
+			// Collector hoisted per loop-eval: iterations allocate no
+			// continuation closure on the synchronous path.
+			const collectValue = (value: unknown): unknown => {
+				if (!discardResults && value !== FAIL) {
+					if (markBody) {
+						markShared(value as Value);
+					}
+					results.push(value as Value);
+				}
+				return undefined;
+			};
 			const runBody = (): unknown => {
 				const b = body(env, ctx);
-				return chain(b, (value) => {
-					if (!discardResults && value !== FAIL) {
-						if (markBody) {
-							markShared(value as Value);
-						}
-						results.push(value as Value);
-					}
-					return undefined;
-				});
+				return isPromise(b) ? b.then(collectValue) : collectValue(b);
 			};
 
 			const runFiltersAndBody = filters.length === 0 ? runBody : (): unknown => {
@@ -2527,6 +2778,79 @@ function rootOf(env: Env): Env {
 		e = e.parent;
 	}
 	return e;
+}
+
+// --- hoisted async tails ---
+// The sync-first combinators run entirely without closure allocation; when
+// an operand suspends they hand off to these shared async continuations.
+
+/** Rest of a read-only failure context / condition list after a suspend. */
+async function runCodesAsync(
+	pending: Promise<unknown>, codes: Code[], next: number, env: Env, ctx: Ctx,
+): Promise<unknown> {
+	let last: unknown = await pending;
+	if (last === FAIL) {
+		return FAIL;
+	}
+	for (let i = next; i < codes.length; i++) {
+		const r = await codes[i](env, ctx);
+		if (r === FAIL) {
+			return FAIL;
+		}
+		last = r;
+	}
+	return last;
+}
+
+/** Rest of a transactional failure context after a suspend. */
+async function finishContextAsync(
+	pending: Promise<unknown>, codes: Code[], next: number, env: Env, ctx: Ctx,
+	saved: Transaction | null, txn: Transaction, commitOnSuccess: boolean,
+): Promise<unknown> {
+	try {
+		let r: unknown = await pending;
+		let last: unknown = undefined;
+		for (let i = next; ; i++) {
+			if (r === FAIL) {
+				ctx.txn = saved;
+				txn.rollback();
+				return FAIL;
+			}
+			last = r;
+			if (i >= codes.length) {
+				break;
+			}
+			r = codes[i](env, ctx);
+			if (isPromise(r)) {
+				r = await r;
+			}
+		}
+		ctx.txn = saved;
+		if (commitOnSuccess) {
+			txn.commit();
+		} else {
+			txn.rollback();
+		}
+		return last;
+	} catch (error) {
+		ctx.txn = saved;
+		txn.rollback();
+		throw error;
+	}
+}
+
+/** Remaining if-clauses after a suspended (and failed) condition list. */
+async function tryClausesAsync(
+	clauses: { conditions: Code; body: Code }[], elseBody: Code | null,
+	start: number, env: Env, ctx: Ctx,
+): Promise<unknown> {
+	for (let i = start; i < clauses.length; i++) {
+		const r = await clauses[i].conditions(env, ctx);
+		if (r !== FAIL) {
+			return clauses[i].body(env, ctx);
+		}
+	}
+	return elseBody ? elseBody(env, ctx) : undefined;
 }
 
 function copyIfStruct(v: Value): Value {

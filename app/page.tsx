@@ -232,10 +232,12 @@ export default function Home() {
               execute pipeline. Expose your own native modules through the same
               bindings API the standard library uses.
             </Feature>
-            <Feature title="Fast closure compilation">
-              The AST compiles to JavaScript closures with a synchronous fast
-              path — sequential Verse code runs without per-statement async
-              overhead, only suspending at real suspension points.
+            <Feature title="Profile-guided performance">
+              The AST compiles to JavaScript closures with a zero-allocation
+              synchronous fast path, plus JIT-style specializations: inline
+              caches for method dispatch, copy-on-write containers with O(1)
+              appends, static operator selection, and rollback journaling
+              that read-only code never pays for.
             </Feature>
             <Feature title="Persistence adapters">
               Module-scoped <code>weak_map</code> variables persist across runs

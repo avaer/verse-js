@@ -181,6 +181,34 @@ The editor seeds these example files:
 | `multi-file-demo.verse` | multi-file workspaces: calls into `math-lib.verse`, cross-file go-to-definition |
 | `persistent-score.verse` | `weak_map(player, int)` persistence across runs |
 
+## Performance
+
+The runtime is a closure compiler, not a naive tree-walker, and it has been
+through several profile-guided optimization passes. The techniques are the
+ones a JIT would use, applied at compile time:
+
+- **Zero-allocation fast path**: straight-line Verse runs through plain
+  loops and branches — no promises, no continuation closures, no per-
+  statement wrappers; execution only goes async at real suspension points
+- **Inline caches**: method dispatch and field access go through per-site
+  two-way polymorphic caches keyed on class identity, with fused
+  `obj.Method(args)` calls that never allocate a bound function
+- **Copy-on-write containers**: arrays and maps are uniqueness-tracked, so
+  `set X += array{...}` appends in place (O(1)) while unaliased and only
+  copies when a second reference exists — list building is linear, not
+  quadratic
+- **Pay-for-what-you-use failure semantics**: the checker proves which
+  failure contexts can write; read-only conditions compile to a plain fail
+  check with no transaction, and writes to context-local variables skip
+  the rollback journal entirely
+- **Static specialization**: operators on statically-numeric operands,
+  range `for` loops, and all-positional calls each compile to dedicated
+  monomorphic fast paths
+
+Changes land only if they win on measurement (`pnpm bench` plus warm
+in-process medians); the numbers and the negative results are recorded in
+[ARCHITECTURE.md](ARCHITECTURE.md#closure-compilation).
+
 ## Language coverage
 
 The implementation follows Epic's public compiler source (the keyword table

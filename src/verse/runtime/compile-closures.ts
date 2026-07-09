@@ -13,7 +13,7 @@ import {
 	Archetype, Block, Call, CaseExpr, ClassDef, Definition, EnumDef, Expr,
 	ForExpr, FunctionDef, IfExpr, Program, SetExpr, VarDefinition,
 } from '../frontend/ast';
-import { EntryClass, SemaData, semaOf } from '../sema/checker';
+import { EntryClass, SemaData, semaOf, WorkspaceFile } from '../sema/checker';
 import { Binding, NativeExport } from '../sema/scopes';
 import { ClassInfo, VType } from '../sema/types';
 import { Ctx } from './context';
@@ -107,11 +107,18 @@ export class NativeClassValue extends VTypeValue {
 }
 
 export interface CompiledProgram {
-	/** Initializes globals then runs top-level statements + entry points. */
-	run(ctx: Ctx): Promise<void>;
+	/**
+	 * Initializes classes/functions/globals from every file, then runs
+	 * top-level statements and entry points. When `entry` is given, only
+	 * that file's top-level statements and entry classes execute (other
+	 * files act as libraries); otherwise every file runs in order.
+	 */
+	run(ctx: Ctx, entry?: string): Promise<void>;
 	globalCount: number;
 	/** The bindings the program was compiled against. */
 	registry: NativeRegistry;
+	/** Workspace file names this program was compiled from. */
+	files: string[];
 }
 
 export interface CompileOptions {
@@ -119,14 +126,17 @@ export interface CompileOptions {
 }
 
 export function compileProgram(
-	program: Program,
+	program: Program | WorkspaceFile[],
 	registry: NativeRegistry,
 	globalCount: number,
 	entryClasses: EntryClass[],
 	options: CompileOptions,
 ): CompiledProgram {
+	const files: WorkspaceFile[] = Array.isArray(program)
+		? program
+		: [{ file: 'main.verse', program }];
 	const compiler = new Compiler(registry, options);
-	return compiler.compile(program, globalCount, entryClasses);
+	return compiler.compile(files, globalCount, entryClasses);
 }
 
 interface FnCompileCtx {
@@ -146,6 +156,8 @@ class Compiler {
 	private classMap: Map<ClassInfo, RuntimeClass> = new Map();
 	private nativeValueCache: Map<NativeExport, Value> = new Map();
 	private fnCtx: FnCompileCtx;
+	/** Workspace file currently being compiled (stamped onto statements). */
+	private currentFile = 'main.verse';
 
 	constructor(registry: NativeRegistry, options: CompileOptions) {
 		this.registry = registry;
@@ -159,52 +171,61 @@ class Compiler {
 		};
 	}
 
-	compile(program: Program, globalCount: number, entryClasses: EntryClass[]): CompiledProgram {
-		// Collect declarations across nested modules, in source order.
-		const classes: ClassDef[] = [];
-		const enums: EnumDef[] = [];
-		const functions: FunctionDef[] = [];
-		const initializers: (Definition | VarDefinition)[] = [];
-		const statements: Expr[] = [];
+	compile(files: WorkspaceFile[], globalCount: number, entryClasses: EntryClass[]): CompiledProgram {
+		// Collect declarations across all files and nested modules, in
+		// file-then-source order, remembering each item's file.
+		const classes: { file: string; def: ClassDef }[] = [];
+		const enums: { file: string; def: EnumDef }[] = [];
+		const functions: { file: string; def: FunctionDef }[] = [];
+		const initializers: { file: string; def: Definition | VarDefinition }[] = [];
+		const statements: { file: string; stmt: Expr }[] = [];
 
-		const collect = (body: Expr[]) => {
+		const collect = (file: string, body: Expr[]) => {
 			for (const stmt of body) {
 				switch (stmt.kind) {
-					case 'ClassDef': classes.push(stmt); break;
-					case 'EnumDef': enums.push(stmt); break;
-					case 'FunctionDef': functions.push(stmt); break;
-					case 'Definition': case 'VarDefinition': initializers.push(stmt); break;
-					case 'ModuleDef': collect(stmt.members); break;
+					case 'ClassDef': classes.push({ file, def: stmt }); break;
+					case 'EnumDef': enums.push({ file, def: stmt }); break;
+					case 'FunctionDef': functions.push({ file, def: stmt }); break;
+					case 'Definition': case 'VarDefinition': initializers.push({ file, def: stmt }); break;
+					case 'ModuleDef': collect(file, stmt.members); break;
 					case 'UsingDecl': case 'TypeAliasDef': break;
-					default: statements.push(stmt); break;
+					default: statements.push({ file, stmt }); break;
 				}
 			}
 		};
-		collect(program.body);
+		for (const { file, program } of files) {
+			collect(file, program.body);
+		}
 
 		// Build runtime class shells, then finalize supers-first.
 		for (const cls of classes) {
-			this.buildRuntimeClass(cls);
+			this.currentFile = cls.file;
+			this.buildRuntimeClass(cls.def);
 		}
 		this.finalizeAll(classes);
 
 		// Compile functions and initializers.
-		const compiledFns = functions.map((fn) => ({
-			slot: semaOf(fn).slot ?? -1,
-			isExtension: !!semaOf(fn).isExtension,
-			name: fn.name,
-			make: this.compileFunction(fn, null),
-		}));
+		const compiledFns = functions.map(({ file, def: fn }) => {
+			this.currentFile = file;
+			return {
+				slot: semaOf(fn).slot ?? -1,
+				isExtension: !!semaOf(fn).isExtension,
+				name: fn.name,
+				make: this.compileFunction(fn, null),
+			};
+		});
 		const compiledInits = initializers
-			.filter((d) => d.value !== null)
-			.map((d) => {
+			.filter(({ def }) => def.value !== null)
+			.map(({ file, def: d }) => {
+				this.currentFile = file;
 				let code = this.compileExpr(d.value as Expr);
 				if (this.debug) {
 					const inner = code;
 					const line = d.span.start.line;
 					code = (env, ctx) => {
 						ctx.line = line;
-						const hook = ctx.shared.debug?.onStatement(line, ctx, env);
+						ctx.file = file;
+						const hook = ctx.shared.debug?.onStatement(line, file, ctx, env);
 						return chain(hook, () => inner(env, ctx));
 					};
 				}
@@ -216,24 +237,29 @@ class Compiler {
 					isWeakMap: this.isPersistentWeakMap(d),
 				};
 			});
-		const compiledStatements = statements.map((s) => ({
-			frameSize: semaOf(s).frameSize ?? 0,
-			code: this.compileStatement(s, true),
-		}));
+		const compiledStatements = statements.map(({ file, stmt }) => {
+			this.currentFile = file;
+			return {
+				file,
+				frameSize: semaOf(stmt).frameSize ?? 0,
+				code: this.compileStatement(stmt, true),
+			};
+		});
 
-		const enumValues = enums.map((e) => ({ def: e, info: semaOf(e).enumInfo }));
-		const classSlots = classes.map((c) => ({
-			slot: semaOf(c).slot ?? -1,
-			rc: this.classMap.get(semaOf(c).classInfo as ClassInfo) as RuntimeClass,
+		const enumValues = enums.map(({ def }) => ({ def, info: semaOf(def).enumInfo }));
+		const classSlots = classes.map(({ def }) => ({
+			slot: semaOf(def).slot ?? -1,
+			rc: this.classMap.get(semaOf(def).classInfo as ClassInfo) as RuntimeClass,
 		}));
 		const entries = entryClasses
 			.map((entry) => ({
 				rc: this.classMap.get(semaOf(entry.def).classInfo as ClassInfo),
 				method: entry.method,
+				file: entry.file,
 			}))
-			.filter((entry): entry is { rc: RuntimeClass; method: string } => !!entry.rc);
+			.filter((entry): entry is { rc: RuntimeClass; method: string; file: string } => !!entry.rc);
 
-		const run = async (ctx: Ctx): Promise<void> => {
+		const run = async (ctx: Ctx, entry?: string): Promise<void> => {
 			const globals = ctx.shared.globals;
 			globals.length = globalCount;
 			const rootEnv: Env = { slots: globals, parent: null, self: undefined };
@@ -244,19 +270,20 @@ class Compiler {
 					globals[slot] = rc;
 				}
 			}
-			for (const entry of compiledFns) {
-				const fnValue = entry.make(rootEnv);
-				if (entry.slot >= 0) {
-					globals[entry.slot] = fnValue;
+			for (const fn of compiledFns) {
+				const fnValue = fn.make(rootEnv);
+				if (fn.slot >= 0) {
+					globals[fn.slot] = fnValue;
 				}
-				if (entry.isExtension) {
+				if (fn.isExtension) {
 					const list = ctx.shared.extensionMethods;
-					list.set(entry.name, fnValue);
+					list.set(fn.name, fnValue);
 				}
 			}
 			void enumValues;
 
-			// 2. Global initializers in source order.
+			// 2. Global initializers from every file, in order (libraries
+			// must be initialized even when only the entry file runs).
 			for (const init of compiledInits) {
 				const env: Env = { slots: new Array(init.frameSize), parent: rootEnv, self: undefined };
 				let value = init.code(env, ctx);
@@ -276,8 +303,11 @@ class Compiler {
 				}
 			}
 
-			// 3. Top-level statements.
+			// 3. Top-level statements (entry file only, when selected).
 			for (const stmt of compiledStatements) {
+				if (entry !== undefined && stmt.file !== entry) {
+					continue;
+				}
 				const env: Env = { slots: new Array(stmt.frameSize), parent: rootEnv, self: undefined };
 				const result = stmt.code(env, ctx);
 				if (isPromise(result)) {
@@ -287,7 +317,10 @@ class Compiler {
 
 			// 4. Entry points: instantiate each matching class, then run its
 			// registered entry method (e.g. creative_device.OnBegin).
-			for (const { rc, method } of entries) {
+			for (const { rc, method, file } of entries) {
+				if (entry !== undefined && file !== entry) {
+					continue;
+				}
 				const instanceResult = this.instantiate(rc, new Map(), { slots: [], parent: rootEnv, self: undefined }, ctx);
 				const instance = (isPromise(instanceResult) ? await instanceResult : instanceResult) as VObject;
 				const entryMethod = rc.methods.get(method);
@@ -301,7 +334,7 @@ class Compiler {
 			}
 		};
 
-		return { run, globalCount, registry: this.registry };
+		return { run, globalCount, registry: this.registry, files: files.map((f) => f.file) };
 	}
 
 	private isPersistentWeakMap(d: Definition | VarDefinition): boolean {
@@ -417,25 +450,26 @@ class Compiler {
 	}
 
 	/** Compiles class bodies supers-first (source order may be arbitrary). */
-	finalizeAll(classes: ClassDef[]): void {
-		const byInfo = new Map<ClassInfo, ClassDef>();
+	finalizeAll(classes: { file: string; def: ClassDef }[]): void {
+		const byInfo = new Map<ClassInfo, { file: string; def: ClassDef }>();
 		for (const cls of classes) {
-			byInfo.set(semaOf(cls).classInfo as ClassInfo, cls);
+			byInfo.set(semaOf(cls.def).classInfo as ClassInfo, cls);
 		}
 		const done = new Set<ClassDef>();
-		const visit = (cls: ClassDef) => {
-			if (done.has(cls)) {
+		const visit = (cls: { file: string; def: ClassDef }) => {
+			if (done.has(cls.def)) {
 				return;
 			}
-			done.add(cls);
-			const info = semaOf(cls).classInfo as ClassInfo;
+			done.add(cls.def);
+			const info = semaOf(cls.def).classInfo as ClassInfo;
 			for (const superInfo of info.supers) {
 				const superDef = byInfo.get(superInfo);
 				if (superDef) {
 					visit(superDef);
 				}
 			}
-			this.finalizeClass(cls);
+			this.currentFile = cls.file;
+			this.finalizeClass(cls.def);
 		};
 		for (const cls of classes) {
 			visit(cls);
@@ -531,6 +565,7 @@ class Compiler {
 		const debug = this.debug;
 		const fnName = fn.name;
 		const line = fn.span.start.line;
+		const file = this.currentFile;
 
 		return (captureEnv: Env) => {
 			const invoke = (self: Value, args: Value[], ctx: Ctx, named?: Map<string, Value>): unknown => {
@@ -591,7 +626,7 @@ class Compiler {
 						return undefined;
 					}
 					if (debug && ctx.shared.debug) {
-						ctx.shared.debug.onEnterFunction(fnName, line);
+						ctx.shared.debug.onEnterFunction(fnName, line, file);
 					}
 					// Scope for `branch` blocks: cancelled when we return.
 					const savedBranchTasks = ctx.branchTasks;
@@ -647,11 +682,13 @@ class Compiler {
 			? this.compileFor(stmt, true)
 			: this.compileExpr(stmt);
 		const line = stmt.span.start.line;
+		const file = this.currentFile;
 		const failSoft = this.fnCtx.failSoft;
 		if (this.debug) {
 			return (env, ctx) => {
 				ctx.line = line;
-				const hook = ctx.shared.debug?.onStatement(line, ctx, env);
+				ctx.file = file;
+				const hook = ctx.shared.debug?.onStatement(line, file, ctx, env);
 				return chain(hook, () => {
 					const r = inner(env, ctx);
 					if (r === FAIL && !failSoft) {
@@ -663,6 +700,7 @@ class Compiler {
 		}
 		return (env, ctx) => {
 			ctx.line = line;
+			ctx.file = file;
 			const r = inner(env, ctx);
 			if (r === FAIL && !failSoft) {
 				throw new VerseRuntimeError('Expression failed outside a failure context', line);

@@ -8,6 +8,8 @@ export interface Diagnostic {
 	severity: 'error' | 'warning';
 	span: Span | null;
 	code?: string;
+	/** Workspace file the diagnostic belongs to (multi-file compiles). */
+	file?: string;
 }
 
 export function diagnosticAt(message: string, span: Span | null, severity: 'error' | 'warning' = 'error', code?: string): Diagnostic {

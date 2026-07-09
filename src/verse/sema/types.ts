@@ -49,6 +49,8 @@ export interface MemberInfo {
 	origin: ClassInfo;
 	/** Declaration site (for go-to-definition); null for natives. */
 	declSpan?: Span | null;
+	/** Workspace file of the declaration (multi-file compiles). */
+	declFile?: string | null;
 }
 
 export interface ClassInfo {

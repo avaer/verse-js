@@ -41,8 +41,9 @@ type BindingVariant =
 	| { kind: 'typeParam'; name: string; type: VType }
 	| { kind: 'typeAlias'; name: string; type: VType };
 
-/** declSpan (where declared, for go-to-definition) rides on every variant. */
-export type Binding = BindingVariant & { declSpan?: Span };
+/** declSpan/declFile (where declared, for go-to-definition) ride on every
+ * variant; declFile is the workspace file for multi-file compiles. */
+export type Binding = BindingVariant & { declSpan?: Span; declFile?: string };
 
 export interface ModuleSymbol {
 	name: string;

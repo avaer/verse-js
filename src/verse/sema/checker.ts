@@ -72,6 +72,14 @@ export interface EntryClass {
 	def: ClassDef;
 	/** Method the runtime invokes on an instance (e.g. 'OnBegin'). */
 	method: string;
+	/** Workspace file the class is defined in. */
+	file: string;
+}
+
+/** One parsed source file of a workspace. */
+export interface WorkspaceFile {
+	file: string;
+	program: Program;
 }
 
 export interface CheckResult {
@@ -87,9 +95,20 @@ export interface CheckResult {
 const ACCESS_SPECIFIERS = new Set(['public', 'private', 'protected', 'internal', 'scoped', 'epic_internal']);
 const CLASS_ONLY_SPECIFIERS = new Set(['abstract', 'concrete', 'final', 'unique', 'castable', 'persistable', 'final_super', 'final_super_base', 'computes', 'transacts', 'varies', 'converges', 'epic_internal', 'public', 'internal', 'open', 'closed']);
 
+/** Single-buffer convenience wrapper over {@link checkWorkspace}. */
 export function checkProgram(program: Program, natives: NativeCatalog): CheckResult {
+	return checkWorkspace([{ file: 'main.verse', program }], natives);
+}
+
+/**
+ * Checks every file of a workspace against one shared module scope: all
+ * top-level definitions from all files are hoisted first (so files can
+ * reference each other in any order), then bodies are checked file by
+ * file. Diagnostics, bindings, and entry classes carry their source file.
+ */
+export function checkWorkspace(files: WorkspaceFile[], natives: NativeCatalog): CheckResult {
 	const checker = new Checker(natives);
-	checker.check(program);
+	checker.checkFiles(files);
 	return {
 		diagnostics: checker.diagnostics,
 		globalSlotCount: checker.globalSlotCount,
@@ -110,6 +129,8 @@ class Checker {
 	private classStack: ClassInfo[] = [];
 	private scope: Scope;
 	private usedPaths: Set<string> = new Set();
+	/** File currently being checked (stamped onto diagnostics/bindings). */
+	private currentFile = 'main.verse';
 	/** name -> extension methods on that name. */
 	private extensions: Map<string, { target: VType; type: FuncT; slot: number; fn: FunctionDef }[]> = new Map();
 
@@ -120,11 +141,26 @@ class Checker {
 	}
 
 	private error(message: string, span: Span | null, code?: string): void {
-		this.diagnostics.push(diagnosticAt(message, span, 'error', code));
+		this.diagnostics.push({ ...diagnosticAt(message, span, 'error', code), file: this.currentFile });
 	}
 
 	private warning(message: string, span: Span | null): void {
-		this.diagnostics.push(diagnosticAt(message, span, 'warning'));
+		this.diagnostics.push({ ...diagnosticAt(message, span, 'warning'), file: this.currentFile });
+	}
+
+	/** Stamps the current file onto a module-scope binding (go-to-def). */
+	private stamp<B extends Binding>(binding: B): B {
+		binding.declFile = this.currentFile;
+		return binding;
+	}
+
+	/** Duplicate-definition error naming the other file when cross-file. */
+	private duplicateError(name: string, span: Span | null, scope: Scope): void {
+		const existing = scope.lookupLocal(name);
+		const where = existing?.declFile && existing.declFile !== this.currentFile
+			? ` (already defined in ${existing.declFile})`
+			: '';
+		this.error(`Duplicate definition of '${name}'${where}`, span, 'duplicate-definition');
 	}
 
 	private allocGlobal(): number {
@@ -139,7 +175,7 @@ class Checker {
 	// Program entry
 	// =====================================================================
 
-	check(program: Program): void {
+	checkFiles(files: WorkspaceFile[]): void {
 		// Implicit modules (the prelude, by default) are always in scope.
 		for (const path of this.natives.implicitPaths) {
 			this.importNativeModule(path, null);
@@ -147,6 +183,8 @@ class Checker {
 
 		// Apply native `using` imports up front so class headers resolving
 		// creative_device/event/... see them regardless of statement order.
+		// Usings land in the shared module scope, so they are visible
+		// workspace-wide (documented deviation from per-file scoping).
 		const applyNativeUsings = (body: Expr[]) => {
 			for (const stmt of body) {
 				if (stmt.kind === 'UsingDecl' && stmt.path.startsWith('/')) {
@@ -156,12 +194,26 @@ class Checker {
 				}
 			}
 		};
-		applyNativeUsings(program.body);
+		for (const { file, program } of files) {
+			this.currentFile = file;
+			applyNativeUsings(program.body);
+		}
 
-		this.collectDefinitions(program.body, this.moduleScope, '(main)');
-		this.resolveSignatures(program.body, this.moduleScope);
-		for (const stmt of program.body) {
-			this.checkTopLevel(stmt);
+		// Hoist all top-level definitions from every file before checking
+		// any bodies, so files can reference each other in any order.
+		for (const { file, program } of files) {
+			this.currentFile = file;
+			this.collectDefinitions(program.body, this.moduleScope, '(main)');
+		}
+		for (const { file, program } of files) {
+			this.currentFile = file;
+			this.resolveSignatures(program.body, this.moduleScope);
+		}
+		for (const { file, program } of files) {
+			this.currentFile = file;
+			for (const stmt of program.body) {
+				this.checkTopLevel(stmt);
+			}
 		}
 	}
 
@@ -246,8 +298,8 @@ class Checker {
 					const declSlot = this.allocGlobal();
 					semaOf(stmt).classInfo = info;
 					semaOf(stmt).slot = declSlot;
-					if (!scope.define(stmt.name, { kind: 'class', name: stmt.name, classInfo: info, declSlot, declSpan: stmt.span })) {
-						this.error(`Duplicate definition of '${stmt.name}'`, stmt.span);
+					if (!scope.define(stmt.name, this.stamp({ kind: 'class', name: stmt.name, classInfo: info, declSlot, declSpan: stmt.span }))) {
+						this.duplicateError(stmt.name, stmt.span, scope);
 					}
 					break;
 				}
@@ -259,8 +311,8 @@ class Checker {
 						modulePath,
 					};
 					semaOf(stmt).enumInfo = info;
-					if (!scope.define(stmt.name, { kind: 'enum', name: stmt.name, enumInfo: info, declSpan: stmt.span })) {
-						this.error(`Duplicate definition of '${stmt.name}'`, stmt.span);
+					if (!scope.define(stmt.name, this.stamp({ kind: 'enum', name: stmt.name, enumInfo: info, declSpan: stmt.span }))) {
+						this.duplicateError(stmt.name, stmt.span, scope);
 					}
 					break;
 				}
@@ -274,8 +326,8 @@ class Checker {
 						access: this.accessFromSpecifiers(stmt.specifiers),
 					};
 					semaOf(stmt).modulePath = subPath;
-					if (!scope.define(stmt.name, { kind: 'module', name: stmt.name, module: moduleSymbol, declSpan: stmt.span })) {
-						this.error(`Duplicate definition of '${stmt.name}'`, stmt.span);
+					if (!scope.define(stmt.name, this.stamp({ kind: 'module', name: stmt.name, module: moduleSymbol, declSpan: stmt.span }))) {
+						this.duplicateError(stmt.name, stmt.span, scope);
 					}
 					this.collectDefinitions(stmt.members, subScope, subPath);
 					break;
@@ -296,17 +348,17 @@ class Checker {
 						semaOf(stmt).slot = slot;
 					} else {
 						const slot = this.allocGlobal();
-						const binding: Binding = {
+						const binding: Binding = this.stamp({
 							kind: 'function',
 							name: stmt.name,
 							slot,
 							type: T.unknown,
 							overloads: [{ fn: stmt, type: this.placeholderFuncType(stmt), slot }],
 							declSpan: stmt.span,
-						};
+						});
 						semaOf(stmt).slot = slot;
 						if (!scope.define(stmt.name, binding)) {
-							this.error(`Duplicate definition of '${stmt.name}'`, stmt.span);
+							this.duplicateError(stmt.name, stmt.span, scope);
 						}
 					}
 					break;
@@ -314,20 +366,20 @@ class Checker {
 				case 'Definition': {
 					const slot = this.allocGlobal();
 					semaOf(stmt).slot = slot;
-					if (!scope.define(stmt.name, {
+					if (!scope.define(stmt.name, this.stamp({
 						kind: 'global', name: stmt.name, slot, mutable: false, type: T.unknown, declSpan: stmt.span,
-					})) {
-						this.error(`Duplicate definition of '${stmt.name}'`, stmt.span);
+					}))) {
+						this.duplicateError(stmt.name, stmt.span, scope);
 					}
 					break;
 				}
 				case 'VarDefinition': {
 					const slot = this.allocGlobal();
 					semaOf(stmt).slot = slot;
-					if (!scope.define(stmt.name, {
+					if (!scope.define(stmt.name, this.stamp({
 						kind: 'global', name: stmt.name, slot, mutable: true, type: T.unknown, declSpan: stmt.span,
-					})) {
-						this.error(`Duplicate definition of '${stmt.name}'`, stmt.span);
+					}))) {
+						this.duplicateError(stmt.name, stmt.span, scope);
 					}
 					break;
 				}
@@ -390,7 +442,7 @@ class Checker {
 				}
 				case 'TypeAliasDef': {
 					const type = this.resolveTypeExpr(stmt.value);
-					scope.define(stmt.name, { kind: 'typeAlias', name: stmt.name, type, declSpan: stmt.span });
+					scope.define(stmt.name, this.stamp({ kind: 'typeAlias', name: stmt.name, type, declSpan: stmt.span }));
 					semaOf(stmt).type = type;
 					break;
 				}
@@ -456,7 +508,7 @@ class Checker {
 		// classes extending creative_device to have OnBegin invoked).
 		for (const entryPoint of this.natives.entryPoints) {
 			if (this.classExtendsNative(info, entryPoint.className)) {
-				this.entryClasses.push({ def: stmt, method: entryPoint.method });
+				this.entryClasses.push({ def: stmt, method: entryPoint.method, file: this.currentFile });
 				break;
 			}
 		}
@@ -476,6 +528,7 @@ class Checker {
 				overloads: [],
 				origin: info,
 				declSpan: member.span,
+				declFile: this.currentFile,
 			};
 			memberInfo.overloads = memberInfo.overloads ?? [];
 			memberInfo.overloads.push(fnType);
@@ -499,6 +552,7 @@ class Checker {
 				hasBody: member.value !== null,
 				origin: info,
 				declSpan: member.span,
+				declFile: this.currentFile,
 			});
 		}
 	}
@@ -701,6 +755,7 @@ class Checker {
 						kind: 'member', name, classInfo: ci, type: member.type,
 						mutable: member.mutable, isMethod: member.isMethod,
 						declSpan: member.declSpan ?? undefined,
+						declFile: member.declFile ?? undefined,
 					});
 				}
 			}

@@ -7,7 +7,8 @@
 import { lex, VerseSyntaxError } from './frontend/lexer';
 import { parseVerseTolerant } from './frontend/parser';
 import { Program } from './frontend/ast';
-import { checkProgram, CheckResult, NativeCatalog } from './sema/checker';
+import { checkWorkspace, CheckResult, NativeCatalog, WorkspaceFile } from './sema/checker';
+import { SourceFsLike, toSourceFs } from './vfs';
 import { Diagnostic } from './sema/diagnostics';
 import {
 	compileProgram, CompiledProgram, toJson,
@@ -20,7 +21,10 @@ import { VMap } from './runtime/values';
 import {
 	buildSymbolIndex, generateDocs, getModulePaths, IndexedSymbolDoc, ModuleDoc,
 } from './docs';
-import { analysisFromOutcome, SourceAnalysis } from './analysis';
+import {
+	analysisFromOutcome, SourceAnalysis, WorkspaceAnalysis,
+	workspaceAnalysisFromOutcome,
+} from './analysis';
 
 export { VerseRunCancelled, VerseRuntimeError, VerseTaskCancelled } from './runtime/failure';
 export type { Diagnostic } from './sema/diagnostics';
@@ -34,12 +38,17 @@ export interface IdeDiagnostic {
 	startColumn: number;
 	endLine: number;
 	endColumn: number;
+	/** Workspace file the diagnostic belongs to (multi-file compiles). */
+	file?: string;
 }
 
-/** A successful compile: parsed program + checker results. */
+/** A successful compile: parsed file(s) + checker results. */
 export interface CompileSuccess {
 	ok: true;
+	/** The (entry) program — for workspaces, the first file's program. */
 	program: Program;
+	/** All parsed workspace files (single-element for `compile`). */
+	files: WorkspaceFile[];
 	check: CheckResult;
 	/** Warnings (and any non-fatal errors when tolerant). */
 	diagnostics: IdeDiagnostic[];
@@ -63,10 +72,11 @@ function toIdeDiagnostic(d: Diagnostic): IdeDiagnostic {
 		endColumn: d.span
 			? Math.max(d.span.end.col, d.span.start.col + 1)
 			: 200,
+		file: d.file,
 	};
 }
 
-function syntaxToIdeDiagnostic(error: VerseSyntaxError): IdeDiagnostic {
+function syntaxToIdeDiagnostic(error: VerseSyntaxError, file?: string): IdeDiagnostic {
 	const end = error.endPos ?? error.pos;
 	return {
 		message: `Syntax error: ${error.message}`,
@@ -75,6 +85,7 @@ function syntaxToIdeDiagnostic(error: VerseSyntaxError): IdeDiagnostic {
 		startColumn: error.pos.col,
 		endLine: end.line,
 		endColumn: end === error.pos ? error.pos.col + 1 : end.col,
+		file,
 	};
 }
 
@@ -101,6 +112,12 @@ export interface RunOptions {
 	rng?: () => number;
 	/** Backedges allowed in a synchronous stretch before erroring. */
 	loopBudget?: number;
+	/**
+	 * Workspace entry file: only this file's top-level statements and
+	 * entry-point classes execute (other files act as libraries). Omit to
+	 * run every file, which is the single-file behavior.
+	 */
+	entry?: string;
 }
 
 /** A running (or finished) Verse program. */
@@ -163,7 +180,7 @@ export function startRun(
 	};
 	const ctx = new Ctx(shared, scheduler.rootTask);
 
-	const done = compiled.run(ctx).finally(() => {
+	const done = compiled.run(ctx, options.entry).finally(() => {
 		flushPersistence(shared);
 	});
 
@@ -236,19 +253,48 @@ export class VerseHost {
 	 * gracefully, matching how an IDE wants live diagnostics while typing.
 	 */
 	compile(source: string, options: { strict?: boolean } = {}): CompileOutcome {
-		// Error-recovering parse: syntax errors are collected per top-level
-		// statement so live diagnostics survive a typo mid-file.
-		const { program, errors } = parseVerseTolerant(source);
-		if (errors.length > 0) {
-			return { ok: false, diagnostics: errors.map(syntaxToIdeDiagnostic) };
+		return this.compileWorkspace({ 'main.verse': source }, options);
+	}
+
+	/**
+	 * Compiles every `.verse` file of a workspace against one shared module
+	 * scope, so files can reference each other's definitions in any order.
+	 * Pass a {@link SourceFileSystem} or a plain path->source object.
+	 * Diagnostics carry the file they belong to. Run the result with
+	 * `run(outcome, { entry: 'main.verse' })` to execute one file's
+	 * top-level statements and entry points with the rest as libraries.
+	 */
+	compileWorkspace(fs: SourceFsLike, options: { strict?: boolean } = {}): CompileOutcome {
+		const sourceFs = toSourceFs(fs);
+		const files: WorkspaceFile[] = [];
+		const syntaxDiagnostics: IdeDiagnostic[] = [];
+		for (const file of sourceFs.listFiles()) {
+			const source = sourceFs.readFile(file);
+			if (source === null) {
+				continue;
+			}
+			// Error-recovering parse: syntax errors are collected per
+			// top-level statement so diagnostics survive a typo mid-file.
+			const { program, errors } = parseVerseTolerant(source);
+			if (errors.length > 0) {
+				syntaxDiagnostics.push(...errors.map((e) => syntaxToIdeDiagnostic(e, file)));
+			} else {
+				files.push({ file, program });
+			}
+		}
+		if (syntaxDiagnostics.length > 0) {
+			return { ok: false, diagnostics: syntaxDiagnostics };
+		}
+		if (files.length === 0) {
+			return { ok: false, diagnostics: [] };
 		}
 
-		const check = checkProgram(program, this.catalog());
+		const check = checkWorkspace(files, this.catalog());
 		const diagnostics = check.diagnostics.map(toIdeDiagnostic);
 		if (options.strict && diagnostics.some((d) => d.severity === 'error')) {
 			return { ok: false, diagnostics };
 		}
-		return { ok: true, program, check, diagnostics };
+		return { ok: true, program: files[0].program, files, check, diagnostics };
 	}
 
 	/**
@@ -258,7 +304,7 @@ export class VerseHost {
 	 */
 	prepare(outcome: CompileSuccess, options: { debug?: boolean } = {}): CompiledProgram {
 		return compileProgram(
-			outcome.program,
+			outcome.files,
 			this.registry,
 			outcome.check.globalSlotCount,
 			outcome.check.entryClasses,
@@ -316,6 +362,43 @@ export class VerseHost {
 		return { output, errors, diagnostics: outcome.diagnostics };
 	}
 
+	/**
+	 * Convenience: compile a workspace (strict) + run one entry file to
+	 * completion, collecting output lines and errors.
+	 */
+	async executeWorkspace(
+		fs: SourceFsLike,
+		options: RunOptions & { entry?: string } = {},
+	): Promise<ExecuteResult> {
+		const output: string[] = [];
+		const errors: string[] = [];
+		const outcome = this.compileWorkspace(fs, { strict: true });
+		if (!outcome.ok) {
+			return {
+				output,
+				errors: outcome.diagnostics.filter((d) => d.severity === 'error').map((d) => d.message),
+				diagnostics: outcome.diagnostics,
+			};
+		}
+		const run = this.run(outcome, {
+			...options,
+			onOutput: (level, text) => {
+				if (level === 'error') {
+					errors.push(text);
+				} else if (level === 'stdout') {
+					output.push(text);
+				}
+				options.onOutput?.(level, text);
+			},
+		});
+		try {
+			await run.done;
+		} catch (error) {
+			errors.push((error as Error).message);
+		}
+		return { output, errors, diagnostics: outcome.diagnostics };
+	}
+
 	/** Documentation for every module registered on this host. */
 	docs(): ModuleDoc[] {
 		if (!this.docsCache) {
@@ -344,6 +427,15 @@ export class VerseHost {
 	 */
 	analyze(source: string): SourceAnalysis {
 		return analysisFromOutcome(this.compile(source));
+	}
+
+	/**
+	 * Compiles a whole workspace for IDE queries. Each file's analysis
+	 * shares the workspace module scope, so hover/definition/completions
+	 * resolve names defined in other files (definitions carry their file).
+	 */
+	analyzeWorkspace(fs: SourceFsLike): WorkspaceAnalysis {
+		return workspaceAnalysisFromOutcome(this.compileWorkspace(fs));
 	}
 }
 

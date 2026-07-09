@@ -15,21 +15,30 @@ const YIELD_EVERY_N_STATEMENTS = 250;
 
 export interface PausedInfo {
 	line: number | null;
+	/** Workspace file paused in (null for single-file runs pre-tagging). */
+	file: string | null;
 	variables: { name: string; value: string }[];
-	callStack: { name: string; line: number | null }[];
+	callStack: { name: string; line: number | null; file: string | null }[];
 	tasks: { id: number; name: string; state: TaskState }[];
 }
 
+/**
+ * Breakpoints: either a plain line array (matches those lines in any file
+ * — the single-file form) or a per-file map of line arrays.
+ */
+export type BreakpointSpec = number[] | Record<string, number[]>;
+
 export interface DebugSessionOptions {
 	debugEnabled: boolean;
-	breakpoints?: number[];
+	breakpoints?: BreakpointSpec;
 	onPaused?: (info: PausedInfo) => void;
 	onResumed?: () => void;
 }
 
 export class DebugSession implements DebugHooks {
 	debugEnabled: boolean;
-	private breakpoints: Set<number>;
+	private anyFileBreakpoints: Set<number> = new Set();
+	private fileBreakpoints: Map<string, Set<number>> = new Map();
 	private onPaused: ((info: PausedInfo) => void) | null;
 	private onResumed: (() => void) | null;
 
@@ -41,17 +50,36 @@ export class DebugSession implements DebugHooks {
 	paused = false;
 
 	/** Call stack of user functions ((top level) is implicit). */
-	private callStack: { name: string; line: number | null }[] = [];
+	private callStack: { name: string; line: number | null; file: string | null }[] = [];
 
 	constructor(options: DebugSessionOptions) {
 		this.debugEnabled = options.debugEnabled;
-		this.breakpoints = new Set(options.breakpoints ?? []);
+		this.setBreakpoints(options.breakpoints ?? []);
 		this.onPaused = options.onPaused ?? null;
 		this.onResumed = options.onResumed ?? null;
 	}
 
-	setBreakpoints(lines: number[]): void {
-		this.breakpoints = new Set(lines ?? []);
+	setBreakpoints(spec: BreakpointSpec): void {
+		this.anyFileBreakpoints = new Set();
+		this.fileBreakpoints = new Map();
+		if (Array.isArray(spec)) {
+			this.anyFileBreakpoints = new Set(spec);
+			return;
+		}
+		for (const [file, lines] of Object.entries(spec ?? {})) {
+			this.fileBreakpoints.set(file, new Set(lines));
+		}
+	}
+
+	private hasBreakpoint(line: number, file: string | null): boolean {
+		if (this.anyFileBreakpoints.has(line)) {
+			return true;
+		}
+		if (file !== null) {
+			const lines = this.fileBreakpoints.get(file);
+			return !!lines && lines.has(line);
+		}
+		return false;
 	}
 
 	resume(): void {
@@ -85,15 +113,15 @@ export class DebugSession implements DebugHooks {
 		}
 	}
 
-	onEnterFunction(name: string, line: number | null): void {
-		this.callStack.push({ name, line });
+	onEnterFunction(name: string, line: number | null, file: string | null): void {
+		this.callStack.push({ name, line, file });
 	}
 
 	onLeaveFunction(): void {
 		this.callStack.pop();
 	}
 
-	onStatement(line: number | null, ctx: Ctx, env: unknown): Promise<void> | void {
+	onStatement(line: number | null, file: string | null, ctx: Ctx, env: unknown): Promise<void> | void {
 		ctx.task.throwIfCancelled();
 
 		this.statementCount += 1;
@@ -116,7 +144,7 @@ export class DebugSession implements DebugHooks {
 			shouldPause = true;
 		} else if (this.stepMode === 'out' && depth < this.stepDepth) {
 			shouldPause = true;
-		} else if (line !== null && this.breakpoints.has(line)) {
+		} else if (line !== null && this.hasBreakpoint(line, file)) {
 			shouldPause = true;
 		}
 
@@ -135,10 +163,11 @@ export class DebugSession implements DebugHooks {
 
 		this.onPaused?.({
 			line,
+			file,
 			variables: snapshotVariables(env as Env | null),
 			callStack: [
 				...[...this.callStack].reverse(),
-				{ name: '(top level)', line: null },
+				{ name: '(top level)', line: null, file: null },
 			],
 			tasks: ctx.shared.scheduler.taskList(),
 		});

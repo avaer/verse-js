@@ -105,32 +105,33 @@ describe('hoverAt', () => {
 describe('definitionAt', () => {
 	it('resolves a function call to the function definition', () => {
 		const pos = posOf('Add(Score');
-		const span = definitionAt(analysis, pos.line, pos.col);
-		expect(span?.start.line).toBe(3);
+		const loc = definitionAt(analysis, pos.line, pos.col);
+		expect(loc?.span.start.line).toBe(3);
+		expect(loc?.file).toBe('main.verse');
 	});
 
 	it('resolves a global use to its definition', () => {
 		const pos = posOf('Score, 8');
-		const span = definitionAt(analysis, pos.line, pos.col);
-		expect(span?.start.line).toBe(1);
+		const loc = definitionAt(analysis, pos.line, pos.col);
+		expect(loc?.span.start.line).toBe(1);
 	});
 
 	it('resolves a local use to its declaration', () => {
 		const pos = posOf('Total, Total');
-		const span = definitionAt(analysis, pos.line, pos.col);
-		expect(span?.start.line).toBe(12);
+		const loc = definitionAt(analysis, pos.line, pos.col);
+		expect(loc?.span.start.line).toBe(12);
 	});
 
 	it('resolves a method member access to its declaration in the class', () => {
 		const pos = posOf('Heal(5)');
-		const span = definitionAt(analysis, pos.line, pos.col);
-		expect(span?.start.line).toBe(8);
+		const loc = definitionAt(analysis, pos.line, pos.col);
+		expect(loc?.span.start.line).toBe(8);
 	});
 
 	it('resolves a class name to the class definition', () => {
 		const pos = posOf('player_stats{}');
-		const span = definitionAt(analysis, pos.line, pos.col);
-		expect(span?.start.line).toBe(6);
+		const loc = definitionAt(analysis, pos.line, pos.col);
+		expect(loc?.span.start.line).toBe(6);
 	});
 
 	it('returns null for natives (no source location)', () => {

@@ -15,22 +15,55 @@ import { FuncT, MemberInfo, typeToString } from './sema/types';
 /** Semantic snapshot of one source buffer, ready for position queries. */
 export interface SourceAnalysis {
 	ok: boolean;
+	/** Workspace file this analysis is for. */
+	file: string;
 	program: Program | null;
+	/** Module scope — shared across all files of a workspace. */
 	moduleScope: Scope | null;
+	diagnostics: IdeDiagnostic[];
+}
+
+/** Per-file semantic snapshots of a whole workspace (shared module scope). */
+export interface WorkspaceAnalysis {
+	ok: boolean;
+	/** file -> analysis for every parsed workspace file. */
+	files: Map<string, SourceAnalysis>;
 	diagnostics: IdeDiagnostic[];
 }
 
 /** Wraps a compile outcome for IDE queries (used by `host.analyze`). */
 export function analysisFromOutcome(outcome: CompileOutcome): SourceAnalysis {
 	if (!outcome.ok) {
-		return { ok: false, program: null, moduleScope: null, diagnostics: outcome.diagnostics };
+		return { ok: false, file: 'main.verse', program: null, moduleScope: null, diagnostics: outcome.diagnostics };
 	}
+	const file = outcome.files[0]?.file ?? 'main.verse';
 	return {
 		ok: true,
+		file,
 		program: outcome.program,
 		moduleScope: outcome.check.moduleScope,
 		diagnostics: outcome.diagnostics,
 	};
+}
+
+/** Wraps a workspace compile outcome for per-file IDE queries (used by
+ * `host.analyzeWorkspace`). Every file shares the workspace module scope,
+ * so queries resolve names defined in other files. */
+export function workspaceAnalysisFromOutcome(outcome: CompileOutcome): WorkspaceAnalysis {
+	const files = new Map<string, SourceAnalysis>();
+	if (!outcome.ok) {
+		return { ok: false, files, diagnostics: outcome.diagnostics };
+	}
+	for (const { file, program } of outcome.files) {
+		files.set(file, {
+			ok: true,
+			file,
+			program,
+			moduleScope: outcome.check.moduleScope,
+			diagnostics: outcome.diagnostics.filter((d) => d.file === file),
+		});
+	}
+	return { ok: true, files, diagnostics: outcome.diagnostics };
 }
 
 // =====================================================================
@@ -314,10 +347,21 @@ export function hoverAt(analysis: SourceAnalysis, line: number, col: number): Ho
 // Go to definition
 // =====================================================================
 
-export function definitionAt(analysis: SourceAnalysis, line: number, col: number): Span | null {
+/** A definition site; `file` is the declaring workspace file. */
+export interface DefinitionLocation {
+	file: string;
+	span: Span;
+}
+
+export function definitionAt(analysis: SourceAnalysis, line: number, col: number): DefinitionLocation | null {
 	if (!analysis.program) {
 		return null;
 	}
+	// Bindings without a declFile (locals, params) are always same-file.
+	const locate = (span: Span, file?: string | null): DefinitionLocation => ({
+		span,
+		file: file ?? analysis.file,
+	});
 	const path = findNodePath(analysis.program, line, col);
 	for (let i = path.length - 1; i >= 0; i--) {
 		const node = path[i];
@@ -325,19 +369,19 @@ export function definitionAt(analysis: SourceAnalysis, line: number, col: number
 		if (node.kind === 'Ident' && sema.binding) {
 			const binding = sema.binding;
 			if (binding.declSpan) {
-				return binding.declSpan;
+				return locate(binding.declSpan, binding.declFile);
 			}
 			if (binding.kind === 'function' && binding.overloads.length > 0) {
-				return binding.overloads[0].fn.span;
+				return locate(binding.overloads[0].fn.span, binding.declFile);
 			}
 			return null;
 		}
 		if (node.kind === 'Member') {
 			if (sema.memberInfo?.declSpan) {
-				return sema.memberInfo.declSpan;
+				return locate(sema.memberInfo.declSpan, sema.memberInfo.declFile);
 			}
 			if (sema.memberBinding?.declSpan) {
-				return sema.memberBinding.declSpan;
+				return locate(sema.memberBinding.declSpan, sema.memberBinding.declFile);
 			}
 			return null;
 		}

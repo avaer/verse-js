@@ -79,6 +79,10 @@ export type {
 // --- Standard library modules (registered by default) ---
 export { coreModules } from './stdlib/index';
 
+// --- Virtual source filesystem (multi-file workspaces) ---
+export { MemorySourceFs, toSourceFs } from './vfs';
+export type { SourceFileSystem, SourceFsLike } from './vfs';
+
 // --- Runtime interfaces embedders may implement ---
 export type {
 	PersistenceAdapter,
@@ -99,5 +103,11 @@ export {
 export type { ModuleDoc, SymbolDoc, IndexedSymbolDoc } from './docs';
 
 // --- IDE language services (see also verse-js/analysis) ---
-export { analysisFromOutcome, hoverAt, definitionAt, completionsAt, findNodePath } from './analysis';
-export type { SourceAnalysis, HoverInfo, CompletionEntry } from './analysis';
+export {
+	analysisFromOutcome, workspaceAnalysisFromOutcome,
+	hoverAt, definitionAt, completionsAt, findNodePath,
+} from './analysis';
+export type {
+	SourceAnalysis, WorkspaceAnalysis, HoverInfo, CompletionEntry,
+	DefinitionLocation,
+} from './analysis';

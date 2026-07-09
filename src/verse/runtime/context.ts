@@ -12,10 +12,11 @@ export type OutputLevel = 'stdout' | 'error' | 'system';
 
 export interface DebugHooks {
 	/** Awaited before each statement in debug builds. `env` is the current
-	 * frame (with `names` populated) for variable inspection. */
-	onStatement(line: number | null, ctx: Ctx, env: unknown): Promise<void> | void;
+	 * frame (with `names` populated) for variable inspection; `file` is the
+	 * workspace file the statement lives in. */
+	onStatement(line: number | null, file: string | null, ctx: Ctx, env: unknown): Promise<void> | void;
 	/** Called when entering/leaving user functions (call stack display). */
-	onEnterFunction(name: string, line: number | null): void;
+	onEnterFunction(name: string, line: number | null, file: string | null): void;
 	onLeaveFunction(): void;
 }
 
@@ -65,6 +66,8 @@ export class Ctx {
 	branchTasks: Task[] | null = null;
 	/** Line of the statement currently executing (error reporting). */
 	line: number | null = null;
+	/** Workspace file of the statement currently executing. */
+	file: string | null = null;
 
 	constructor(shared: SharedCtx, task: Task, txn: Transaction | null = null) {
 		this.shared = shared;

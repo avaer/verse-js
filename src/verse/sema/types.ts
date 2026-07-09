@@ -3,6 +3,7 @@
 // enums, tuples, functions, type parameters. Provides subtyping, joins,
 // generic substitution/unification, and printing.
 
+import { Span } from '../frontend/tokens';
 import { EffectSet, makeEffects } from './effects';
 
 export type VType =
@@ -46,6 +47,8 @@ export interface MemberInfo {
 	/** Overload set for functions with multiple definitions. */
 	overloads?: FuncT[];
 	origin: ClassInfo;
+	/** Declaration site (for go-to-definition); null for natives. */
+	declSpan?: Span | null;
 }
 
 export interface ClassInfo {

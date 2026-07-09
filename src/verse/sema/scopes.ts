@@ -3,6 +3,7 @@
 // frames, module-level globals, class members, natives, and imports.
 
 import { Expr, FunctionDef } from '../frontend/ast';
+import { Span } from '../frontend/tokens';
 import { EffectSet } from './effects';
 import { ClassInfo, EnumInfo, FuncT, VType } from './types';
 
@@ -25,7 +26,7 @@ export interface Frame {
 	slotCount: number;
 }
 
-export type Binding =
+type BindingVariant =
 	| { kind: 'local'; name: string; slot: number; frameDepth: number; mutable: boolean; type: VType; frame?: Frame | null }
 	| { kind: 'global'; name: string; slot: number; mutable: boolean; type: VType }
 	| {
@@ -39,6 +40,9 @@ export type Binding =
 	| { kind: 'native'; name: string; export: NativeExport }
 	| { kind: 'typeParam'; name: string; type: VType }
 	| { kind: 'typeAlias'; name: string; type: VType };
+
+/** declSpan (where declared, for go-to-definition) rides on every variant. */
+export type Binding = BindingVariant & { declSpan?: Span };
 
 export interface ModuleSymbol {
 	name: string;

@@ -43,6 +43,10 @@ export interface SemaData {
 	isExtension?: boolean;
 	modulePath?: string;
 	failable?: boolean;
+	/** Lexical scope active while checking this expression (for IDE tooling). */
+	scope?: Scope;
+	/** Resolved member info for dynamic member access (for IDE tooling). */
+	memberInfo?: MemberInfo;
 }
 
 export function semaOf(node: Expr): SemaData {
@@ -63,6 +67,8 @@ export interface CheckResult {
 	/** Entry info: classes extending creative_device with OnBegin, etc. */
 	deviceClasses: ClassDef[];
 	topLevelStatements: Expr[];
+	/** Top-level scope with all module definitions + imported natives. */
+	moduleScope: Scope;
 }
 
 const ACCESS_SPECIFIERS = new Set(['public', 'private', 'protected', 'internal', 'scoped', 'epic_internal']);
@@ -76,6 +82,7 @@ export function checkProgram(program: Program, natives: NativeCatalog): CheckRes
 		globalSlotCount: checker.globalSlotCount,
 		deviceClasses: checker.deviceClasses,
 		topLevelStatements: checker.topLevelStatements,
+		moduleScope: checker.moduleScope,
 	};
 }
 
@@ -85,7 +92,7 @@ class Checker {
 	globalSlotCount = 0;
 	deviceClasses: ClassDef[] = [];
 	topLevelStatements: Expr[] = [];
-	private moduleScope: Scope;
+	moduleScope: Scope;
 	private fnStack: FunctionContext[] = [];
 	private classStack: ClassInfo[] = [];
 	private scope: Scope;
@@ -224,7 +231,7 @@ class Checker {
 					const declSlot = this.allocGlobal();
 					semaOf(stmt).classInfo = info;
 					semaOf(stmt).slot = declSlot;
-					if (!scope.define(stmt.name, { kind: 'class', name: stmt.name, classInfo: info, declSlot })) {
+					if (!scope.define(stmt.name, { kind: 'class', name: stmt.name, classInfo: info, declSlot, declSpan: stmt.span })) {
 						this.error(`Duplicate definition of '${stmt.name}'`, stmt.span);
 					}
 					break;
@@ -237,7 +244,7 @@ class Checker {
 						modulePath,
 					};
 					semaOf(stmt).enumInfo = info;
-					if (!scope.define(stmt.name, { kind: 'enum', name: stmt.name, enumInfo: info })) {
+					if (!scope.define(stmt.name, { kind: 'enum', name: stmt.name, enumInfo: info, declSpan: stmt.span })) {
 						this.error(`Duplicate definition of '${stmt.name}'`, stmt.span);
 					}
 					break;
@@ -252,7 +259,7 @@ class Checker {
 						access: this.accessFromSpecifiers(stmt.specifiers),
 					};
 					semaOf(stmt).modulePath = subPath;
-					if (!scope.define(stmt.name, { kind: 'module', name: stmt.name, module: moduleSymbol })) {
+					if (!scope.define(stmt.name, { kind: 'module', name: stmt.name, module: moduleSymbol, declSpan: stmt.span })) {
 						this.error(`Duplicate definition of '${stmt.name}'`, stmt.span);
 					}
 					this.collectDefinitions(stmt.members, subScope, subPath);
@@ -280,6 +287,7 @@ class Checker {
 							slot,
 							type: T.unknown,
 							overloads: [{ fn: stmt, type: this.placeholderFuncType(stmt), slot }],
+							declSpan: stmt.span,
 						};
 						semaOf(stmt).slot = slot;
 						if (!scope.define(stmt.name, binding)) {
@@ -292,7 +300,7 @@ class Checker {
 					const slot = this.allocGlobal();
 					semaOf(stmt).slot = slot;
 					if (!scope.define(stmt.name, {
-						kind: 'global', name: stmt.name, slot, mutable: false, type: T.unknown,
+						kind: 'global', name: stmt.name, slot, mutable: false, type: T.unknown, declSpan: stmt.span,
 					})) {
 						this.error(`Duplicate definition of '${stmt.name}'`, stmt.span);
 					}
@@ -302,7 +310,7 @@ class Checker {
 					const slot = this.allocGlobal();
 					semaOf(stmt).slot = slot;
 					if (!scope.define(stmt.name, {
-						kind: 'global', name: stmt.name, slot, mutable: true, type: T.unknown,
+						kind: 'global', name: stmt.name, slot, mutable: true, type: T.unknown, declSpan: stmt.span,
 					})) {
 						this.error(`Duplicate definition of '${stmt.name}'`, stmt.span);
 					}
@@ -367,7 +375,7 @@ class Checker {
 				}
 				case 'TypeAliasDef': {
 					const type = this.resolveTypeExpr(stmt.value);
-					scope.define(stmt.name, { kind: 'typeAlias', name: stmt.name, type });
+					scope.define(stmt.name, { kind: 'typeAlias', name: stmt.name, type, declSpan: stmt.span });
 					semaOf(stmt).type = type;
 					break;
 				}
@@ -447,6 +455,7 @@ class Checker {
 				hasBody: member.body !== null,
 				overloads: [],
 				origin: info,
+				declSpan: member.span,
 			};
 			memberInfo.overloads = memberInfo.overloads ?? [];
 			memberInfo.overloads.push(fnType);
@@ -469,6 +478,7 @@ class Checker {
 				isMethod: false,
 				hasBody: member.value !== null,
 				origin: info,
+				declSpan: member.span,
 			});
 		}
 	}
@@ -669,6 +679,7 @@ class Checker {
 					classScope.define(name, {
 						kind: 'member', name, classInfo: ci, type: member.type,
 						mutable: member.mutable, isMethod: member.isMethod,
+						declSpan: member.declSpan ?? undefined,
 					});
 				}
 			}
@@ -826,6 +837,7 @@ class Checker {
 			fnScope.define(param.name, {
 				kind: 'local', name: param.name, slot, frameDepth: 0,
 				mutable: false, type: fnType.params[index].type, frame: fnScope.frame,
+				declSpan: param.span,
 			});
 			(param as Param & { sema?: SemaData }).sema = { slot };
 		});
@@ -1015,6 +1027,7 @@ class Checker {
 	// =====================================================================
 
 	checkExpr(expr: Expr, expected?: VType): VType {
+		semaOf(expr).scope = this.scope;
 		const type = this.checkExprInner(expr, expected);
 		semaOf(expr).type = type;
 		return type;
@@ -1170,7 +1183,7 @@ class Checker {
 				semaOf(expr).slot = slot;
 				const ok = this.scope.define(expr.name, {
 					kind: 'local', name: expr.name, slot, frameDepth: 0, mutable: false, type: valueType,
-					frame: this.scope.owningFrame(),
+					frame: this.scope.owningFrame(), declSpan: expr.span,
 				});
 				if (!ok) {
 					this.error(`'${expr.name}' is already defined in this scope`, expr.span, 'duplicate');
@@ -1187,7 +1200,7 @@ class Checker {
 				const fnType = this.resolveFunctionType(expr);
 				this.scope.define(expr.name, {
 					kind: 'local', name: expr.name, slot, frameDepth: 0, mutable: false, type: fnType,
-					frame: this.scope.owningFrame(),
+					frame: this.scope.owningFrame(), declSpan: expr.span,
 				});
 				this.checkFunctionDef(expr, null);
 				return T.void;
@@ -1754,6 +1767,7 @@ class Checker {
 				if (superInfo) {
 					const member = this.lookupMember(superInfo, expr.name);
 					if (member) {
+						semaOf(expr).memberInfo = member;
 						return member.type;
 					}
 					this.error(`Superclass '${superInfo.name}' has no member '${expr.name}'`, expr.span, 'unknown-member');
@@ -1769,6 +1783,7 @@ class Checker {
 			// Substitute class type args into member types for parametrics.
 			const member = this.lookupMember(targetType.info, expr.name);
 			if (member) {
+				semaOf(expr).memberInfo = member;
 				if (member.access === 'private' && this.classStack[this.classStack.length - 1] !== member.origin) {
 					this.error(`'${expr.name}' is private to ${member.origin.name}`, expr.span, 'access');
 				}
@@ -1986,6 +2001,7 @@ class Checker {
 			mutable: stmt.kind === 'VarDefinition',
 			type: declared ?? valueType,
 			frame: this.scope.owningFrame(),
+			declSpan: stmt.span,
 		});
 		if (!ok) {
 			this.error(`'${stmt.name}' is already defined in this scope`, stmt.span, 'duplicate');
@@ -2167,14 +2183,14 @@ class Checker {
 			(generator as ForGenerator & { sema?: SemaData }).sema = { slot };
 			forScope.define(generator.name, {
 				kind: 'local', name: generator.name, slot, frameDepth: 0, mutable: false, type: elemType,
-				frame: this.scope.owningFrame(),
+				frame: this.scope.owningFrame(), declSpan: generator.span,
 			});
 			if (generator.valueName) {
 				const valueSlot = this.scope.allocSlot();
 				(generator as ForGenerator & { semaValue?: SemaData }).semaValue = { slot: valueSlot };
 				forScope.define(generator.valueName, {
 					kind: 'local', name: generator.valueName, slot: valueSlot, frameDepth: 0, mutable: false,
-					type: valueType ?? T.unknown, frame: this.scope.owningFrame(),
+					type: valueType ?? T.unknown, frame: this.scope.owningFrame(), declSpan: generator.span,
 				});
 			}
 		}

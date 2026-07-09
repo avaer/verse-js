@@ -1,0 +1,80 @@
+@import "tailwindcss";
+
+:root {
+  --background: #181818;
+  --foreground: #cccccc;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-geist-sans), "Segoe UI", system-ui, sans-serif;
+  font-size: 13px;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(121, 121, 121, 0.4);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(150, 150, 150, 0.6);
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Monaco debug decorations */
+.verse-breakpoint-glyph {
+  position: relative;
+}
+.verse-breakpoint-glyph::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 9px;
+  height: 9px;
+  margin: -4.5px 0 0 -4.5px;
+  border-radius: 50%;
+  background: #e51400;
+}
+
+.verse-paused-line {
+  background: rgba(255, 214, 89, 0.14) !important;
+  outline: 1px solid rgba(255, 214, 89, 0.25);
+}
+
+.verse-paused-glyph {
+  position: relative;
+}
+.verse-paused-glyph::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  margin: -5px 0 0 -4px;
+  border-left: 8px solid #ffd659;
+  border-top: 5px solid transparent;
+  border-bottom: 5px solid transparent;
+}

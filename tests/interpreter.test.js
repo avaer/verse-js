@@ -1,0 +1,1270 @@
+// Vendorized from johanfortus/Verse-Online-Editor (MIT), adapted to the
+// verse-js module layout and the async interpreter.
+import { describe, expect, it } from 'vitest';
+import { injectEnds } from '../src/verse/preprocess.js';
+import { parse } from '../src/verse/parser.js';
+import { analyzeProgram } from '../src/verse/semanticAnalysis.js';
+import { VerseInterpreter } from '../src/verse/interpreter.js';
+
+async function run(source) {
+	const ast = parse(injectEnds(source));
+	analyzeProgram(ast);
+	return await new VerseInterpreter().interpret(ast);
+}
+
+// skip analyzeProgram() so interpreter evaluation can be tested on constructs
+// (e.g. printing logic/array values) that real Verse's semantic checks reject.
+async function runInterpreterOnly(source) {
+	const ast = parse(injectEnds(source));
+	return await new VerseInterpreter().interpret(ast);
+}
+
+describe('variables and string interpolation', () => {
+	it('prints hello world and evaluates a string-interpolated expression', async () => {
+		const source = `
+using { /Fortnite.com/Devices }
+using { /Verse.org/Simulation }
+using { /UnrealEngine.com/Temporary/Diagnostics }
+
+# See https://dev.epicgames.com/documentation/en-us/uefn/create-your-own-device-in-verse for how to create a verse device.
+
+# A Verse-authored creative device that can be placed in a level
+hello_world_device := class(creative_device):
+
+    # Runs when the device is started in a running game
+    OnBegin<override>()<suspends>:void=
+        # TODO: Replace this with your code
+        Print("Hello, world!")
+        Print("2 + 2 = {2 + 2}")
+`;
+
+		const expected = [
+			'Hello, world!',
+			'2 + 2 = 4',
+			'',
+		].join('\n');
+
+		expect(await runInterpreterOnly(source)).toBe(expected);
+	});
+
+	
+	it('evaluates arithmetic, logic, and compound assignment expressions', async () => {
+		const source = `
+using { /Fortnite.com/Devices }
+using { /Verse.org/Simulation }
+using { /UnrealEngine.com/Temporary/Diagnostics }
+
+hello_world_device := class(creative_device):
+
+    OnBegin<override>()<suspends>:void=
+        var x : int = 10
+        var y : int = 5
+        var z : float = 2.5
+        var isTrue : logic = true
+        var isFalse : logic = false
+
+        Print("x + y = {x + y}")
+        Print("x - y = {x - y}")
+        Print("x * y = {x * y}")
+        Print("x / y = {x / y}")
+        Print("x > y is {x > y}")
+        Print("x < y is {x < y}")
+        Print("isTrue and isFalse is {isTrue and isFalse}")
+        Print("isTrue or isFalse is {isTrue or isFalse}")
+        Print("not isTrue is {not isTrue}")
+        Print("isTrue? evaluates to {isTrue?}")
+
+        set x += 5
+        Print("After x += 5, x is {x}")
+
+        if (z > 2.0 and x > 10):
+            Print("Both conditions are true!")
+`;
+
+		const expected = [
+			'x + y = 15',
+			'x - y = 5',
+			'x * y = 50',
+			'x / y = 2',
+			'x > y is true',
+			'x < y is false',
+			'isTrue and isFalse is false',
+			'isTrue or isFalse is true',
+			'not isTrue is false',
+			'isTrue? evaluates to true',
+			'After x += 5, x is 15',
+			'Both conditions are true!',
+			'',
+		].join('\n');
+
+		expect(await runInterpreterOnly(source)).toBe(expected);
+	});
+
+
+	it('handles variable initialization, string interpolation, and reassignment', async () => {
+		const source = `
+using { /Fortnite.com/Devices }
+using { /Verse.org/Simulation }
+using { /UnrealEngine.com/Temporary/Diagnostics }
+
+hello_world_device := class(creative_device):
+
+    OnBegin<override>()<suspends>:void=
+        var playerName : string = "John Doe"
+        var height : int = 100
+        var strength : int = 100
+        var charisma : string = "Uncharismatic"
+        var favoriteFood : string = "Mac n Cheese"
+        var totalXP : float = 1500.25
+
+        Print("Name: {playerName}")
+        Print("Height: {height}")
+        Print("Strength: {strength}")
+        Print("Charisma: {charisma}")
+        Print("Favorite Food: {favoriteFood}")
+        Print("Total XP: {totalXP}")
+
+        set strength = 110
+        Print("Updated Strength: {strength}")
+`;
+
+		const expected = [
+			'Name: John Doe',
+			'Height: 100',
+			'Strength: 100',
+			'Charisma: Uncharismatic',
+			'Favorite Food: Mac n Cheese',
+			'Total XP: 1500.25',
+			'Updated Strength: 110',
+			'',
+		].join('\n');
+
+		expect(await runInterpreterOnly(source)).toBe(expected);
+	});
+
+	
+	it('handles inline evaluation of logic variables', async () => {
+		const source = `
+using { /Fortnite.com/Devices }
+using { /Verse.org/Simulation }
+using { /UnrealEngine.com/Temporary/Diagnostics }
+
+hello_world_device := class(creative_device):
+
+    OnBegin<override>()<suspends>:void=
+        var isTrue : logic = true
+        var isFalse : logic = false
+        Print("{isTrue}")
+        Print("{isFalse}")
+`;
+
+		const expected = [
+			'true',
+			'false',
+			'',
+		].join('\n');
+
+		expect(await runInterpreterOnly(source)).toBe(expected);
+	});
+
+
+	it('handles initialization of primitive variable types', async () => {
+		const source = `
+using { /Fortnite.com/Devices }
+using { /Verse.org/Simulation }
+using { /UnrealEngine.com/Temporary/Diagnostics }
+
+hello_world_device := class(creative_device):
+
+    OnBegin<override>()<suspends>:void=
+        var myName : string = "Johan"
+        var x : int = 20
+        var y : float = 21.0
+        var isTrue : logic = true
+        var isFalse : logic = false
+`;
+
+		const expected = [
+			'',
+		].join('\n');
+
+		expect(await runInterpreterOnly(source)).toBe(expected);
+	})
+});
+
+
+describe('if and conditional expressions', () => {
+	it('evaluates if / else baseline', async () => {
+		const source = `
+using { /Fortnite.com/Devices }
+using { /Verse.org/Simulation }
+
+hello_world_device := class(creative_device):
+
+    OnBegin<override>()<suspends>:void=
+        if (10 > 5):
+            Print("if branch")
+        else:
+            Print("else branch")
+`;
+
+		const expected = [
+			'if branch',
+			'',
+		].join('\n');
+
+		expect(await runInterpreterOnly(source)).toBe(expected);
+	});
+
+
+	it('evaluates an inline if-then statement without an else', async () => {
+		const source = `
+using { /Fortnite.com/Devices }
+using { /Verse.org/Simulation }
+
+hello_world_device := class(creative_device):
+
+    OnBegin<override>()<suspends>:void=
+        if (10 > 5) then:
+            Print("then branch")
+`;
+
+		const expected = [
+			'then branch',
+			'',
+		].join('\n');
+
+		expect(await runInterpreterOnly(source)).toBe(expected);
+	});
+
+
+	it('evaluates an inline if-then-else statement', async () => {
+		const source = `
+using { /Fortnite.com/Devices }
+using { /Verse.org/Simulation }
+
+hello_world_device := class(creative_device):
+
+    OnBegin<override>()<suspends>:void=
+        if (10 > 5) then:
+            Print("then branch")
+        else:
+            Print("else branch")
+`;
+
+		const expected = [
+			'then branch',
+			'',
+		].join('\n');
+
+		expect(await runInterpreterOnly(source)).toBe(expected);
+	});
+
+
+	it('evaluates a multi-branch else-if chain', async () => {
+		const source = `
+using { /Fortnite.com/Devices }
+using { /Verse.org/Simulation }
+
+hello_world_device := class(creative_device):
+
+    OnBegin<override>()<suspends>:void=
+        if (10 < 5):
+            Print("first if")
+        else if (10 < 8):
+            Print("else if")
+        else:
+            Print("final else")
+`;
+
+		const expected = [
+			'final else',
+			'',
+		].join('\n');
+
+		expect(await runInterpreterOnly(source)).toBe(expected);
+	});
+
+
+	it('evaluates multi-branch logic via a nested if-else', async () => {
+		const source = `
+using { /Fortnite.com/Devices }
+using { /Verse.org/Simulation }
+
+hello_world_device := class(creative_device):
+
+    OnBegin<override>()<suspends>:void=
+        if (10 < 5):
+            Print("first if")
+        else:
+            if (10 < 8):
+                Print("nested else-if")
+            else:
+                Print("final else")
+`;
+
+		const expected = [
+			'final else',
+			'',
+		].join('\n');
+
+		expect(await runInterpreterOnly(source)).toBe(expected);
+	});
+
+	it('evaluates block-structured if-then-else clauses', async () => {
+		const source = `
+using { /Fortnite.com/Devices }
+using { /Verse.org/Simulation }
+
+hello_world_device := class(creative_device):
+
+    OnBegin<override>()<suspends>:void=
+        if:
+            10 > 5
+        then:
+            Print("then branch")
+        else:
+            Print("else branch")
+`;
+
+		const expected = [
+			'then branch',
+			'',
+		].join('\n');
+
+		expect(await runInterpreterOnly(source)).toBe(expected);
+	});
+
+	it('evaluates inline conditional blocks using curly braces', async () => {
+		const source = `
+using { /Fortnite.com/Devices }
+using { /Verse.org/Simulation }
+
+hello_world_device := class(creative_device):
+
+    OnBegin<override>()<suspends>:void=
+        if (10 > 5) {
+            Print("if branch")
+        } else {
+            Print("else branch")
+        }
+`;
+
+		const expected = [
+			'if branch',
+			'',
+		].join('\n');
+
+		expect(await runInterpreterOnly(source)).toBe(expected);
+	});
+
+
+	it('evaluates curly brace conditionals in Allman style', async () => {
+		const source = `
+using { /Fortnite.com/Devices }
+using { /Verse.org/Simulation }
+
+hello_world_device := class(creative_device):
+
+    OnBegin<override>()<suspends>:void=
+        if (10 > 5)
+        {
+            Print("if branch")
+        }
+        else
+        {
+            Print("else branch")
+        }
+`;
+
+		const expected = [
+			'if branch',
+			'',
+		].join('\n');
+
+		expect(await runInterpreterOnly(source)).toBe(expected);
+	});
+
+
+	it('evaluates an inline curly brace block paired with then', async () => {
+		const source = `
+using { /Fortnite.com/Devices }
+using { /Verse.org/Simulation }
+
+hello_world_device := class(creative_device):
+
+    OnBegin<override>()<suspends>:void=
+        if (10 > 5) then {
+            Print("then branch")
+        }   
+        else {
+            Print("else branch")
+        }
+`;
+
+		const expected = [
+			'then branch',
+			'',
+		].join('\n');
+
+		expect(await runInterpreterOnly(source)).toBe(expected);
+	});
+
+
+	it('evaluates an else-if chain with a variable condition', async () => {
+		const source = `
+using { /Fortnite.com/Devices }
+using { /Verse.org/Simulation }
+using { /UnrealEngine.com/Temporary/Diagnostics }
+
+hello_world_device := class(creative_device):
+
+    OnBegin<override>()<suspends>:void=
+        var x : int = 20
+        if (x > 10):
+            Print("x > 10")
+        else if (x > 5):
+            Print("x > 5")
+        else:
+            Print("x <= 5")
+`;
+
+		const expected = [
+			'x > 10',
+			'',
+		].join('\n');
+
+		expect(await runInterpreterOnly(source)).toBe(expected);
+	});
+});
+
+
+describe('control flow', () => {
+	it('evaluates a loop with a break statement', async () => {
+		const source = `
+using { /Fortnite.com/Devices }
+using { /Verse.org/Simulation }
+using { /UnrealEngine.com/Temporary/Diagnostics }
+
+hello_world_device := class(creative_device):
+
+    OnBegin<override>()<suspends>:void=
+        var i : int = 0
+        loop:
+            Print("i is {i}")
+            set i += 1
+            if (i > 5):
+                break
+`;
+
+		const expected = [
+			'i is 0',
+			'i is 1',
+			'i is 2',
+			'i is 3',
+			'i is 4',
+			'i is 5',
+			'',
+		].join('\n');
+
+		expect(await runInterpreterOnly(source)).toBe(expected);
+	});
+
+
+	it('evaluates for loop', async () => {
+		const source = `
+using { /Fortnite.com/Devices }
+using { /Verse.org/Simulation }
+using { /UnrealEngine.com/Temporary/Diagnostics }
+
+hello_world_device := class(creative_device):
+
+    OnBegin<override>()<suspends>:void=
+        for (x := 1..5):
+            Print("x is {x}")
+`;
+
+		const expected = [
+			'x is 1',
+			'x is 2',
+			'x is 3',
+			'x is 4',
+			'x is 5',
+			'',
+		].join('\n');
+
+		expect(await runInterpreterOnly(source)).toBe(expected);
+	});
+
+	it('evaluates multiple independent loops consecutively', async () => {
+		const source = `
+using { /Fortnite.com/Devices }
+using { /Verse.org/Simulation }
+using { /UnrealEngine.com/Temporary/Diagnostics }
+
+hello_world_device := class(creative_device):
+
+    OnBegin<override>()<suspends>:void=
+        var i : int = 0
+        loop:
+            Print("i is {i}")
+            set i += 1
+            if (i > 5):
+                break
+
+        var j : int = 0
+        loop:
+            Print("j is {j}")
+            set j += 1
+            if (j > 5):
+                break
+`
+
+		const expected = [
+			'i is 0',
+			'i is 1',
+			'i is 2',
+			'i is 3',
+			'i is 4',
+			'i is 5',
+			'j is 0',
+			'j is 1',
+			'j is 2',
+			'j is 3',
+			'j is 4',
+			'j is 5',
+			'',
+		].join('\n');
+
+		expect(await runInterpreterOnly(source)).toBe(expected);
+	});
+});
+
+
+describe('operators', () => {
+	it('handles logical operators and the query/decision operator', async () => {
+		const source = `
+using { /Fortnite.com/Devices }
+using { /Verse.org/Simulation }
+using { /UnrealEngine.com/Temporary/Diagnostics }
+
+hello_world_device := class(creative_device):
+
+    OnBegin<override>()<suspends>:void=
+        var isTrue : logic = true
+        var isFalse : logic = false
+        Print("isTrue and isFalse is {isTrue and isFalse}")
+        Print("isTrue or isFalse is {isTrue or isFalse}")
+        Print("not isTrue is {not isTrue}")
+        Print("isTrue? evaluates to {isTrue?}")
+`
+
+		const expected = [
+			'isTrue and isFalse is false',
+			'isTrue or isFalse is true',
+			'not isTrue is false',
+			'isTrue? evaluates to true',
+			'',
+		].join('\n');
+
+		expect(await runInterpreterOnly(source)).toBe(expected);
+	});
+
+
+	it('evaluates and prints raw logical expressions', async () => {
+		const source = `
+using { /Fortnite.com/Devices }
+using { /Verse.org/Simulation }
+using { /UnrealEngine.com/Temporary/Diagnostics }
+
+hello_world_device := class(creative_device):
+
+    OnBegin<override>()<suspends>:void=
+        var a : logic = true
+        var b : logic = false
+        Print("{a and b}")
+        Print("{a or b}")
+        Print("{not a}")
+        Print("{a?}")
+`
+
+		const expected = [
+			'false',
+			'true',
+			'false',
+			'true',
+			'',
+		].join('\n');
+
+		expect(await runInterpreterOnly(source)).toBe(expected);
+	});
+
+	it('float variable initialization and compound arithmetic assignments', async () => {
+		const source = `
+using { /Fortnite.com/Devices }
+using { /Verse.org/Simulation }
+using { /UnrealEngine.com/Temporary/Diagnostics }
+
+# See https://dev.epicgames.com/documentation/en-us/uefn/create-your-own-device-in-verse for how to create a verse device.
+
+# A Verse-authored creative device that can be placed in a level
+hello_world_device := class(creative_device):
+
+    # Runs when the device is started in a running game
+    OnBegin<override>()<suspends>:void=
+
+        var X : float = 100.0
+        set X += 10.0
+        Print("{X}")
+
+        set X -= 10.0
+        Print("{X}")
+
+        set X *= 10.0
+        Print("{X}")
+
+        set X /= 2.0
+        Print("{X}")
+`;
+
+		const expected = [
+			'110',
+			'100',
+			'1000',
+			'500',
+			'',
+		].join('\n');
+
+		expect(await runInterpreterOnly(source)).toBe(expected);
+	});
+
+	it('evaluates equality operator', async () => {
+		const source = `
+using { /Fortnite.com/Devices }
+using { /UnrealEngine.com/Temporary/Diagnostics }
+
+hello_world_device := class(creative_device):
+
+    OnBegin<override>()<suspends>:void=
+        Value : int = 7
+
+        if (Value = 7):
+            Print("PASS: single '=' works as equality for 7")
+
+        if (Value = 8):
+            Print("FAIL: 7 should not equal 8")
+        else:
+            Print("PASS: single '=' correctly reports 7 != 8")
+`;
+
+		const expected = [
+			"PASS: single '=' works as equality for 7",
+			"PASS: single '=' correctly reports 7 != 8",
+			'',
+		].join('\n');
+
+		expect(await runInterpreterOnly(source)).toBe(expected);
+	});
+
+	it('evaluates equality operator inside a if-then statement', async () => {
+		const source = `
+using { /Fortnite.com/Devices }
+using { /UnrealEngine.com/Temporary/Diagnostics }
+
+hello_world_device := class(creative_device):
+
+    OnBegin<override>()<suspends>:void=
+        num1 : int = 25
+        num2 : int = 25
+
+        if:
+            num1 = num2
+        then:
+            Print("equal")
+        else:
+            Print("not equal")
+`;
+
+		const expected = [
+			'equal',
+			'',
+		].join('\n');
+
+		expect(await runInterpreterOnly(source)).toBe(expected);
+	});
+});
+
+
+describe('arrays', () => {
+	it('handles array iteration and conditional element indexing', async () => {
+		const source = `
+using { /Fortnite.com/Devices }
+using { /Verse.org/Simulation }
+using { /UnrealEngine.com/Temporary/Diagnostics }
+
+hello_world_device := class(creative_device):
+
+    OnBegin<override>()<suspends>:void=
+        var ExampleArray : []int = array{10, 20, 30, 40, 50}
+        for (Index := 0..ExampleArray.Length - 1):
+            if (Element := ExampleArray[Index]):
+                Print("{Element} in ExampleArray at index {Index}")
+`
+		const expected = [
+			'10 in ExampleArray at index 0',
+			'20 in ExampleArray at index 1',
+			'30 in ExampleArray at index 2',
+			'40 in ExampleArray at index 3',
+			'50 in ExampleArray at index 4',
+			'',
+		].join('\n');
+
+		expect(await runInterpreterOnly(source)).toBe(expected);
+	});
+});
+
+
+describe('functions', () => {
+	it('handles custom function definition, invocation, and return values', async () => {
+		const source = `
+using { /Fortnite.com/Devices }
+using { /Verse.org/Simulation }
+using { /UnrealEngine.com/Temporary/Diagnostics }
+
+hello_world_device := class(creative_device):
+
+    OnBegin<override>()<suspends>:void=
+        result := Add(2, 2)
+        Print("{result}")
+        
+    Add(a: int, b: int) : int=
+        return a + b
+`;
+
+		const expected = [
+			'4',
+			'',
+		].join('\n');
+
+		expect(await runInterpreterOnly(source)).toBe(expected);
+	});
+
+
+	it('calls a user-defined decides function and branches on success/failure', async () => {
+		const source = `
+using { /Fortnite.com/Devices }
+using { /Verse.org/Simulation }
+using { /UnrealEngine.com/Temporary/Diagnostics }
+
+hello_world_device := class(creative_device):
+
+    OnBegin<override>()<suspends>:void=
+        if (IsGreater[10, 5]):
+            Print("The comparison was successful!")
+        else:
+            Print("The comparison failed.")
+            
+    IsGreater(A:int, B:int)<transacts><decides>:void=
+        A > B
+`;
+
+		const expected = [
+			'The comparison was successful!',
+			'',
+		].join('\n');
+
+		expect(await runInterpreterOnly(source)).toBe(expected);
+	});
+})
+
+
+describe('curly brace syntax', () => {
+	it('handles curly brace block syntax', async () => {
+		const source = `
+using { /Fortnite.com/Devices }
+using { /Verse.org/Simulation }
+using { /UnrealEngine.com/Temporary/Diagnostics }
+
+hello_world_device := class(creative_device):
+
+    OnBegin<override>()<suspends>:void=
+        var ExampleArray : []int = array{10, 20, 30, 40, 50, 60}
+        for (Index := 0..ExampleArray.Length - 1) {
+            if (Element := ExampleArray[Index]) {
+                Print("{Element} in ExampleArray at index {Index}")
+            }
+        }
+
+        if (3.0 > 2.0 and 20 > 10) {
+            Print("Both conditions are true!")
+        }
+`;
+
+		const expected = [
+			'10 in ExampleArray at index 0',
+			'20 in ExampleArray at index 1',
+			'30 in ExampleArray at index 2',
+			'40 in ExampleArray at index 3',
+			'50 in ExampleArray at index 4',
+			'60 in ExampleArray at index 5',
+			'Both conditions are true!',
+			'',
+		].join('\n');
+
+		expect(await runInterpreterOnly(source)).toBe(expected);
+	});
+
+	it('handles newline curly brace formatting (Allman style)', async () => {
+		const source = `
+using { /Fortnite.com/Devices }
+using { /Verse.org/Simulation }
+using { /UnrealEngine.com/Temporary/Diagnostics }
+
+hello_world_device := class(creative_device):
+
+    OnBegin<override>()<suspends>:void=
+        var ExampleArray : []int = array{10, 20, 30, 40, 50, 60}
+        for (Index := 0..ExampleArray.Length - 1)
+        {
+            if (Element := ExampleArray[Index])
+            {
+                Print("{Element} in ExampleArray at index {Index}")
+            }
+        }
+
+        if (3.0 > 2.0 and 20 > 10)
+        {
+            Print("Both conditions are true!")
+        }
+`;
+
+		const expected = [
+			'10 in ExampleArray at index 0',
+			'20 in ExampleArray at index 1',
+			'30 in ExampleArray at index 2',
+			'40 in ExampleArray at index 3',
+			'50 in ExampleArray at index 4',
+			'60 in ExampleArray at index 5',
+			'Both conditions are true!',
+			'',
+		].join('\n');
+
+		expect(await runInterpreterOnly(source)).toBe(expected);
+	});
+});
+
+
+describe('integration', () => {
+	it('evaluates a combination of features - control flow, expressions, loops, and arrays', async () => {
+		const source = `
+using { /Fortnite.com/Devices }
+using { /Verse.org/Simulation }
+using { /UnrealEngine.com/Temporary/Diagnostics }
+
+hello_world_device := class(creative_device):
+
+    OnBegin<override>()<suspends>:void=
+        var x : int = 10
+        var y : int = 5
+        var z : float = 2.5
+        var isTrue : logic = true
+        var isFalse : logic = false
+
+        Print("x + y = {x + y}")
+        Print("x - y = {x - y}")
+        Print("x * y = {x * y}")
+        Print("x / y = {x / y}")
+        Print("x > y is {x > y}")
+        Print("x < y is {x < y}")
+        Print("isTrue and isFalse is {isTrue and isFalse}")
+        Print("isTrue or isFalse is {isTrue or isFalse}")
+        Print("not isTrue is {not isTrue}")
+        Print("isTrue? evaluates to {isTrue?}")
+
+        set x += 5 
+        Print("After x += 5, x is {x}")
+
+        if (z > 2.0 and x > 10):
+            Print("Both conditions are true!")
+
+        var i : int = 0
+        loop:
+            Print("i is {i}")
+            set i += 1
+            if (i > 5):
+                break
+
+        var ExampleArray : []int = array{10, 20, 30, 40, 50}
+        for (Index := 0..ExampleArray.Length - 1):
+            if (Element := ExampleArray[Index]):
+                Print("{Element} in ExampleArray at index {Index}")
+`;
+
+		const expected = [
+			'x + y = 15',
+			'x - y = 5',
+			'x * y = 50',
+			'x / y = 2',
+			'x > y is true',
+			'x < y is false',
+			'isTrue and isFalse is false',
+			'isTrue or isFalse is true',
+			'not isTrue is false',
+			'isTrue? evaluates to true',
+			'After x += 5, x is 15',
+			'Both conditions are true!',
+			'i is 0',
+			'i is 1',
+			'i is 2',
+			'i is 3',
+			'i is 4',
+			'i is 5',
+			'10 in ExampleArray at index 0',
+			'20 in ExampleArray at index 1',
+			'30 in ExampleArray at index 2',
+			'40 in ExampleArray at index 3',
+			'50 in ExampleArray at index 4',
+			'',
+		].join('\n');
+
+		expect(await runInterpreterOnly(source)).toBe(expected);
+	});
+
+	it('handles comments, constants, type inference, and control flow structures', async () => {
+		const source = `
+using { /Fortnite.com/Devices }
+using { /Verse.org/Simulation }
+using { /UnrealEngine.com/Temporary/Diagnostics }
+
+hello_world_device := class(creative_device):
+
+    OnBegin<override>()<suspends>:void=
+        # Write your Verse code here
+        var x : int = 10
+        var y : int = 5
+        var z : float = 2.5
+        var isTrue : logic = true
+        var isFalse : logic = false
+
+        Print("x + y = {x + y}")
+        Print("x - y = {x - y}")
+        Print("x * y = {x * y}")
+        Print("x / y = {x / y}")
+        Print("x > y is {x > y}")
+        Print("x < y is {x < y}")
+        Print("isTrue and isFalse is {isTrue and isFalse}")
+        Print("isTrue or isFalse is {isTrue or isFalse}")
+        Print("not isTrue is {not isTrue}")
+        Print("isTrue? evaluates to {isTrue?}")
+
+        set x += 5 
+        Print("After x += 5, x is {x}")
+
+        if (z > 2.0 and x > 10):
+            Print("Both conditions are true!")
+
+        var i : int = 0
+        loop:
+            Print("i is {i}")
+            set i += 1
+            if (i > 5):
+                break
+
+        var ExampleArray : []int = array{10, 20, 30, 40, 50}
+        for (Index := 0..ExampleArray.Length - 1):
+            if (Element := ExampleArray[Index]):
+                Print("{Element} in ExampleArray at index {Index}")
+
+        AConstantInteger := 5
+        Print("AnInteger: {AConstantInteger}")
+
+        var AnInteger : int = 7
+        Print("AnotherInteger: {AnInteger}")
+
+        for (i : int = 0..10):
+            Print("{i}")
+`;
+
+		const expected = [
+			'x + y = 15',
+			'x - y = 5',
+			'x * y = 50',
+			'x / y = 2',
+			'x > y is true',
+			'x < y is false',
+			'isTrue and isFalse is false',
+			'isTrue or isFalse is true',
+			'not isTrue is false',
+			'isTrue? evaluates to true',
+			'After x += 5, x is 15',
+			'Both conditions are true!',
+			'i is 0',
+			'i is 1',
+			'i is 2',
+			'i is 3',
+			'i is 4',
+			'i is 5',
+			'10 in ExampleArray at index 0',
+			'20 in ExampleArray at index 1',
+			'30 in ExampleArray at index 2',
+			'40 in ExampleArray at index 3',
+			'50 in ExampleArray at index 4',
+			'AnInteger: 5',
+			'AnotherInteger: 7',
+			'0',
+			'1',
+			'2',
+			'3',
+			'4',
+			'5',
+			'6',
+			'7',
+			'8',
+			'9',
+			'10',
+			'',
+		].join('\n');
+
+		expect(await runInterpreterOnly(source)).toBe(expected);
+	});
+});
+
+
+describe('failure contexts and decides effects', () => {
+	it('routes an out-of-bounds array access inside an if to the else branch', async () => {
+		const source = `
+using { /Fortnite.com/Devices }
+using { /Verse.org/Simulation }
+using { /UnrealEngine.com/Temporary/Diagnostics }
+
+hello_world_device := class(creative_device):
+
+    OnBegin<override>()<suspends>:void=
+        var ExampleArray : []int = array{10, 20, 30}
+        if (Element := ExampleArray[10]):
+            Print("Found {Element}")
+        else:
+            Print("Index out of bounds")
+`;
+		const expected = [
+			'Index out of bounds',
+			'',
+		].join('\n');
+
+		expect(await run(source)).toBe(expected);
+	});
+
+	it('evaluates Floor[] success and failure (NaN) branches', async () => {
+		const source = `
+using { /Fortnite.com/Devices }
+using { /Verse.org/Simulation }
+using { /UnrealEngine.com/Temporary/Diagnostics }
+
+hello_world_device := class(creative_device):
+
+    OnBegin<override>()<suspends>:void=
+        if (Whole := Floor[4.5]):
+            Print("Floor succeeded: {Whole}")
+        else:
+            Print("Floor failed")
+
+        if (Whole := Floor[0.0 / 0.0]):
+            Print("Floor succeeded: {Whole}")
+        else:
+            Print("Floor failed")
+`;
+		const expected = [
+			'Floor succeeded: 4',
+			'Floor failed',
+			'',
+		].join('\n');
+
+		expect(await run(source)).toBe(expected);
+	});
+
+	it('evaluates Mod[] success and division-by-zero failure branches', async () => {
+		const source = `
+using { /Fortnite.com/Devices }
+using { /Verse.org/Simulation }
+using { /UnrealEngine.com/Temporary/Diagnostics }
+
+hello_world_device := class(creative_device):
+
+    OnBegin<override>()<suspends>:void=
+        if (Remainder := Mod[10, 3]):
+            Print("Mod succeeded: {Remainder}")
+        else:
+            Print("Mod failed")
+
+        if (Remainder := Mod[10, 0]):
+            Print("Mod succeeded: {Remainder}")
+        else:
+            Print("Mod failed")
+`;
+		const expected = [
+			'Mod succeeded: 1',
+			'Mod failed',
+			'',
+		].join('\n');
+
+		expect(await run(source)).toBe(expected);
+	});
+
+	it('falls back to the right operand of or when the left operand fails', async () => {
+		const source = `
+using { /Fortnite.com/Devices }
+using { /Verse.org/Simulation }
+using { /UnrealEngine.com/Temporary/Diagnostics }
+
+hello_world_device := class(creative_device):
+
+    OnBegin<override>()<suspends>:void=
+        var ExampleArray : []int = array{10, 20, 30}
+        if (Element := ExampleArray[10] or 99):
+            Print("Element is {Element}")
+`;
+		const expected = [
+			'Element is 99',
+			'',
+		].join('\n');
+
+		expect(await run(source)).toBe(expected);
+	});
+
+	it('evaluates built-in Floor and Mod functions', async () => {
+		const source = `
+using { /Fortnite.com/Devices }
+using { /Verse.org/Simulation }
+using { /UnrealEngine.com/Temporary/Diagnostics }
+
+hello_world_device := class(creative_device):
+
+    OnBegin<override>()<suspends>:void=
+        var MyInt : int = 11
+
+        if (NewValue := Floor[4.0 / 2.0]):
+            set MyInt = NewValue
+            Print("MyInt is now {MyInt}")
+        
+        if (ModResult := Mod[10, 3]):
+            Print("Modulo result: {ModResult}")
+`;
+
+		const expected = [
+			'MyInt is now 2',
+			'Modulo result: 1',
+			'',
+		].join('\n');
+
+		expect(await run(source)).toBe(expected);
+	});
+
+	it('compiles Floor(MyInt / 2) because the rational-argument Floor overload is non-decides, while the nested int division supplies the failure context', async () => {
+		const source = `
+using { /Fortnite.com/Devices }
+using { /Verse.org/Simulation }
+using { /UnrealEngine.com/Temporary/Diagnostics }
+
+hello_world_device := class(creative_device):
+
+    OnBegin<override>()<suspends>:void=
+        var MyInt : int = 11
+
+        if (NewValue := Floor(MyInt / 2)):
+            set MyInt = NewValue
+            Print("MyInt is now {MyInt}")
+
+        if (ModResult := Mod[10, 3]):
+            Print("Modulo result: {ModResult}")
+`;
+
+		const expected = [
+			'MyInt is now 5',
+			'Modulo result: 1',
+			'',
+		].join('\n');
+
+		expect(await run(source)).toBe(expected);
+	});
+
+	it('evaluates Quotient[] with a truncating, non-failing inexact division and a failing zero-divisor', async () => {
+		const source = `
+using { /Fortnite.com/Devices }
+using { /Verse.org/Simulation }
+using { /UnrealEngine.com/Temporary/Diagnostics }
+
+hello_world_device := class(creative_device):
+
+    OnBegin<override>()<suspends>:void=
+        if (Exact := Quotient[10, 2]):
+            Print("Quotient[10,2] = {Exact}")
+
+        if (Truncated := Quotient[10, 3]):
+            Print("Quotient[10,3] = {Truncated}")
+        else:
+            Print("Quotient[10,3] failed")
+
+        if (ByZero := Quotient[10, 0]):
+            Print("Quotient[10,0] = {ByZero}")
+        else:
+            Print("Quotient[10,0] failed")
+`;
+
+		const expected = [
+			'Quotient[10,2] = 5',
+			'Quotient[10,3] = 3',
+			'Quotient[10,0] failed',
+			'',
+		].join('\n');
+
+		expect(await run(source)).toBe(expected);
+	});
+
+	it('evaluates int division as a rational-producing decides operation that only fails on zero-divisor', async () => {
+		const source = `
+using { /Fortnite.com/Devices }
+using { /Verse.org/Simulation }
+using { /UnrealEngine.com/Temporary/Diagnostics }
+
+hello_world_device := class(creative_device):
+
+    OnBegin<override>()<suspends>:void=
+        if (Inexact := 10 / 3):
+            Print("10 / 3 = {Floor(Inexact)}")
+
+        if (ByZero := 10 / 0):
+            Print("10 / 0 = {Floor(ByZero)}")
+        else:
+            Print("10 / 0 failed")
+`;
+
+		const expected = [
+			'10 / 3 = 3',
+			'10 / 0 failed',
+			'',
+		].join('\n');
+
+		expect(await run(source)).toBe(expected);
+	});
+
+	it('evaluates float division outside any failure context since it is never decides', async () => {
+		const source = `
+using { /Fortnite.com/Devices }
+using { /Verse.org/Simulation }
+using { /UnrealEngine.com/Temporary/Diagnostics }
+
+hello_world_device := class(creative_device):
+
+    OnBegin<override>()<suspends>:void=
+        var Result : float = 10.0 / 3.0
+        Print("{Result}")
+`;
+
+		const expected = [
+			`${10.0 / 3.0}`,
+			'',
+		].join('\n');
+
+		expect(await run(source)).toBe(expected);
+	});
+});

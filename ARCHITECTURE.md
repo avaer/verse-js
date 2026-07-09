@@ -216,19 +216,25 @@ also has.
 Module-scoped `var X : weak_map(key, value)` declarations marked by the
 checker as persistable are loaded from the host's `PersistenceAdapter` at
 run start (`versemap:<name>` keys, JSON pairs) and flushed back when the
-run finishes. The adapter interface is two synchronous methods:
+run finishes. The adapter interface is synchronous:
 
 ```ts
 interface PersistenceAdapter {
   load(key: string): string | null;
   store(key: string, json: string): void;
+  clear?(): void; // optional: wipe all persistent data this adapter manages
 }
 ```
 
 Implementations: `MemoryStorageAdapter` (tests/ephemeral),
 `LocalStorageAdapter` (the IDE), and `JsonFileStorageAdapter`
 (`verse-js/adapters/node`; one JSON object file, lazy read,
-write-through). Session identity (e.g. `GetLocalPlayer()`) uses stable
+write-through). All three implement `clear()`: memory drops its map, the
+localStorage adapter removes every key under its prefix (default
+`'verse:'`, so unrelated origin data is untouched), and the file adapter
+writes an emptied file. The IDE's toolbar Reset button calls `clear()` on
+its shared adapter, so resetting the workspace also wipes persistent
+weak_map data. Session identity (e.g. `GetLocalPlayer()`) uses stable
 `persistKey`s so weak_map entries survive across runs.
 
 ## IDE language services

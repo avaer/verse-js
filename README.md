@@ -128,7 +128,8 @@ and `tests/embedding/host.test.ts` for working examples of each.
   options (`?t`, `option{}`, postfix `?`), unions, aliases, `unique` /
   `castable` classes with `X[e]` casts, extension methods, overloading
 - **Persistence**: module-scoped `var X : weak_map(player, t)` survives runs
-  via the localStorage adapter, with `<persistable>` validation
+  via the localStorage adapter, with `<persistable>` validation; the toolbar
+  Reset button clears it (`PersistenceAdapter.clear()`)
 - **Browsable builtin docs**: the docs panel, hovers, and completions are all
   generated from the host's bindings registry, so they never go stale
 - Multi-file workspace (create/rename/delete `.verse` files) persisted to

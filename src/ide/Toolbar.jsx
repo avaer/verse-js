@@ -121,7 +121,7 @@ export default function Toolbar({
 			</span>
 
 			<button
-				title="Reset workspace to the bundled example files (discards edits)"
+				title="Reset workspace to the bundled example files (discards edits and clears persistent Verse data)"
 				onClick={onResetWorkspace}
 				disabled={runState !== 'idle'}
 				className={`flex items-center gap-1.5 rounded px-2.5 py-1 text-xs transition-colors

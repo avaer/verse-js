@@ -19,9 +19,23 @@ export interface DebugHooks {
 	onLeaveFunction(): void;
 }
 
+/**
+ * Synchronous key/value storage for Verse `<persistable>` weak_map data.
+ * The runtime loads each persistent map at run start and writes it back at
+ * the end of the run. Implementations live in `verse-js/adapters` (memory,
+ * localStorage) and `verse-js/adapters/node` (JSON file).
+ */
 export interface PersistenceAdapter {
+	/** Returns the stored JSON for a key, or null when absent. */
 	load(key: string): string | null;
+	/** Stores JSON under a key (write-through). */
 	store(key: string, json: string): void;
+	/**
+	 * Removes every entry managed by this adapter, resetting all Verse
+	 * persistent state it backs. Optional; hosts/UIs offering a "reset
+	 * persistent data" action should call this.
+	 */
+	clear?(): void;
 }
 
 export interface SharedCtx {

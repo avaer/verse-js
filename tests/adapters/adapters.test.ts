@@ -7,9 +7,34 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createHost } from '../../src/verse';
-import { MemoryStorageAdapter } from '../../src/verse/adapters';
+import { LocalStorageAdapter, MemoryStorageAdapter } from '../../src/verse/adapters';
 import { JsonFileStorageAdapter } from '../../src/verse/adapters/node';
 import { uefnModules } from '../../src/verse/extras/uefn';
+
+/** Minimal in-memory Storage (the DOM interface) for LocalStorageAdapter tests. */
+function makeFakeStorage(): Storage {
+	const data = new Map<string, string>();
+	return {
+		get length() {
+			return data.size;
+		},
+		key(index: number) {
+			return [...data.keys()][index] ?? null;
+		},
+		getItem(key: string) {
+			return data.get(key) ?? null;
+		},
+		setItem(key: string, value: string) {
+			data.set(key, value);
+		},
+		removeItem(key: string) {
+			data.delete(key);
+		},
+		clear() {
+			data.clear();
+		},
+	};
+}
 
 describe('MemoryStorageAdapter', () => {
 	it('roundtrips values and returns null for missing keys', () => {
@@ -19,6 +44,35 @@ describe('MemoryStorageAdapter', () => {
 		expect(adapter.load('a')).toBe('{"x":1}');
 		adapter.clear();
 		expect(adapter.load('a')).toBeNull();
+	});
+});
+
+describe('LocalStorageAdapter', () => {
+	it('roundtrips values under its prefix', () => {
+		const storage = makeFakeStorage();
+		const adapter = new LocalStorageAdapter({ storage });
+		expect(adapter.load('missing')).toBeNull();
+		adapter.store('versemap:Scores', '[[1,2]]');
+		expect(adapter.load('versemap:Scores')).toBe('[[1,2]]');
+		// Keys land in storage under the default 'verse:' prefix.
+		expect(storage.getItem('verse:versemap:Scores')).toBe('[[1,2]]');
+	});
+
+	it('clear() removes only keys under its own prefix', () => {
+		const storage = makeFakeStorage();
+		storage.setItem('unrelated-app-data', 'keep me');
+		const other = new LocalStorageAdapter({ storage, prefix: 'other:' });
+		other.store('k', '"theirs"');
+
+		const adapter = new LocalStorageAdapter({ storage });
+		adapter.store('versemap:A', '1');
+		adapter.store('versemap:B', '2');
+		adapter.clear();
+
+		expect(adapter.load('versemap:A')).toBeNull();
+		expect(adapter.load('versemap:B')).toBeNull();
+		expect(storage.getItem('unrelated-app-data')).toBe('keep me');
+		expect(other.load('k')).toBe('"theirs"');
 	});
 });
 
@@ -65,6 +119,17 @@ describe('JsonFileStorageAdapter', () => {
 		const adapter = new JsonFileStorageAdapter(file);
 		adapter.store('k', '"v"');
 		expect(new JsonFileStorageAdapter(file).load('k')).toBe('"v"');
+	});
+
+	it('clear() empties the file on disk', () => {
+		const file = join(dir, 'store.json');
+		const adapter = new JsonFileStorageAdapter(file);
+		adapter.store('a', '1');
+		adapter.store('b', '2');
+		adapter.clear();
+		expect(adapter.load('a')).toBeNull();
+		expect(new JsonFileStorageAdapter(file).load('b')).toBeNull();
+		expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({});
 	});
 });
 
@@ -115,6 +180,15 @@ describe('persistence through a host', () => {
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
+	});
+
+	it('clear() resets persistent state between runs', async () => {
+		const adapter = new MemoryStorageAdapter();
+		const host = createHost({ modules: uefnModules, persistence: adapter });
+		expect((await host.execute(PERSISTENT_SOURCE)).output).toEqual(['score was 0']);
+		expect((await host.execute(PERSISTENT_SOURCE)).output).toEqual(['score was 10']);
+		adapter.clear();
+		expect((await host.execute(PERSISTENT_SOURCE)).output).toEqual(['score was 0']);
 	});
 
 	it('per-run persistence overrides the host default', async () => {

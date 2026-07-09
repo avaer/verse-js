@@ -41,6 +41,16 @@ export class JsonFileStorageAdapter implements PersistenceAdapter {
 	store(key: string, json: string): void {
 		const data = this.ensureLoaded();
 		data[key] = json;
+		this.flush(data);
+	}
+
+	/** Removes every stored entry and writes the emptied file. */
+	clear(): void {
+		this.data = {};
+		this.flush(this.data);
+	}
+
+	private flush(data: Record<string, string>): void {
 		mkdirSync(dirname(this.filePath), { recursive: true });
 		writeFileSync(this.filePath, JSON.stringify(data, null, '\t'));
 	}

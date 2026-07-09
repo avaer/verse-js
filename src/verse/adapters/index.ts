@@ -37,16 +37,24 @@ export class MemoryStorageAdapter implements PersistenceAdapter {
 }
 
 /**
- * Browser localStorage-backed storage. Keys can be namespaced with a
- * prefix so multiple embeddings on one origin don't collide.
+ * Browser localStorage-backed storage. Keys are namespaced with a prefix
+ * (default `'verse:'`) so `clear()` can safely remove only the entries
+ * this adapter manages, and so multiple embeddings on one origin don't
+ * collide — pass a distinct prefix per embedding if you run several.
  */
 export class LocalStorageAdapter implements PersistenceAdapter {
 	private readonly prefix: string;
-	private readonly storage: Storage;
+	private readonly explicitStorage: Storage | null;
 
 	constructor(options: { prefix?: string; storage?: Storage } = {}) {
-		this.prefix = options.prefix ?? '';
-		this.storage = options.storage ?? window.localStorage;
+		this.prefix = options.prefix ?? 'verse:';
+		this.explicitStorage = options.storage ?? null;
+	}
+
+	// Resolved lazily so the adapter can be constructed during SSR/module
+	// evaluation where `window` doesn't exist yet.
+	private get storage(): Storage {
+		return this.explicitStorage ?? window.localStorage;
 	}
 
 	load(key: string): string | null {
@@ -55,5 +63,20 @@ export class LocalStorageAdapter implements PersistenceAdapter {
 
 	store(key: string, json: string): void {
 		this.storage.setItem(this.prefix + key, json);
+	}
+
+	/** Removes every key under this adapter's prefix; other data on the
+	 * origin (including other prefixes) is untouched. */
+	clear(): void {
+		const doomed: string[] = [];
+		for (let i = 0; i < this.storage.length; i++) {
+			const key = this.storage.key(i);
+			if (key !== null && key.startsWith(this.prefix)) {
+				doomed.push(key);
+			}
+		}
+		for (const key of doomed) {
+			this.storage.removeItem(key);
+		}
 	}
 }

@@ -16,8 +16,7 @@ import DebugPanel from './DebugPanel.jsx';
 import DocsPanel from './DocsPanel.jsx';
 import { loadFiles, saveFiles, loadUiState, saveUiState, makeLogEntry } from './store.js';
 import { VerseRunCancelled, VerseTaskCancelled } from '@/src/verse';
-import { LocalStorageAdapter } from '@/src/verse/adapters';
-import { ideHost } from './verse-host';
+import { ideHost, idePersistence } from './verse-host';
 import { DebugSession } from '@/src/verse/debug/DebugSession';
 import { EXAMPLE_FILES } from './examples.js';
 
@@ -216,7 +215,7 @@ export default function Ide() {
 			run = ideHost.run(result, {
 				onOutput: (level, text) => appendLog(level, text),
 				debug: debugEnabled ? session : null,
-				persistence: new LocalStorageAdapter(),
+				persistence: idePersistence,
 			});
 		} catch (error) {
 			appendLog('error', `Compile error: ${error.message}`, { file: fileName });
@@ -357,8 +356,20 @@ export default function Ide() {
 	}, [files, openFile]);
 
 	const resetWorkspace = useCallback(() => {
-		if (!window.confirm('Reset workspace to the bundled examples? This discards your edits.')) {
+		if (
+			!window.confirm(
+				'Reset workspace to the bundled examples? This discards your edits and clears persistent Verse data (weak_maps).',
+			)
+		) {
 			return;
+		}
+		idePersistence.clear();
+		// Earlier IDE builds stored weak_map data as unprefixed 'versemap:*'
+		// keys; sweep those too so Reset leaves no stale persistent state.
+		for (const key of Object.keys(window.localStorage)) {
+			if (key.startsWith('versemap:')) {
+				window.localStorage.removeItem(key);
+			}
 		}
 		const fresh = { ...EXAMPLE_FILES };
 		setFiles(fresh);

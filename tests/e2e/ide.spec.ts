@@ -59,3 +59,43 @@ test('Debug pauses on a breakpoint, shows state, steps, and continues', async ({
 	await expect(consoleOut.getByText('— Finished —')).toBeVisible();
 	await expect(page.getByText('Paused on breakpoint')).toHaveCount(0);
 });
+
+test('Reset clears persistent weak_map storage', async ({ page }) => {
+	await openIde(page);
+	page.on('dialog', (dialog) => dialog.accept());
+
+	const consoleOut = page.getByTestId('console-output');
+	const runOnce = async () => {
+		await page.getByRole('button', { name: 'Clear', exact: true }).click();
+		await page.getByRole('button', { name: 'Run', exact: true }).click();
+		await expect(consoleOut.getByText('— Finished —')).toBeVisible();
+		const text = await consoleOut.innerText();
+		const match = text.match(/best so far: (\d+)/);
+		expect(match).not.toBeNull();
+		return Number(match![1]);
+	};
+
+	await page.getByText('persistent-score.verse', { exact: true }).click();
+
+	// First run starts from 0 and stores a roll (always >= 1) in the
+	// persistent weak_map; the second run sees it.
+	expect(await runOnce()).toBe(0);
+	expect(await runOnce()).toBeGreaterThan(0);
+	const storedKeys = await page.evaluate(() =>
+		Object.keys(window.localStorage).filter((key) => key.startsWith('verse:')),
+	);
+	expect(storedKeys.length).toBeGreaterThan(0);
+
+	// Reset (confirm auto-accepted) wipes the persistent store...
+	await page.getByRole('button', { name: 'Reset', exact: true }).click();
+	const keysAfterReset = await page.evaluate(() =>
+		Object.keys(window.localStorage).filter(
+			(key) => key.startsWith('verse:') || key.startsWith('versemap:'),
+		),
+	);
+	expect(keysAfterReset).toEqual([]);
+
+	// ...so the next run starts from 0 again.
+	await page.getByText('persistent-score.verse', { exact: true }).click();
+	expect(await runOnce()).toBe(0);
+});

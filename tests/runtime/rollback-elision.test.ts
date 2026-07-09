@@ -161,3 +161,104 @@ Print("{Log}")
 		expect(r.output).toEqual(['0']);
 	});
 });
+
+describe('context-local write elision (journal skipped for same-depth locals)', () => {
+	it('<decides> function locals compute correctly with elided journaling', async () => {
+		const r = await run(`
+Sum(N : int)<decides> : int =
+    N > 0
+    var Acc : int = 0
+    for (I := 1..N):
+        set Acc += I
+    Acc
+if (S := Sum[10]):
+    Print("{S}")
+if (not Sum[-1]):
+    Print("failed as expected")
+`);
+		expect(r.errors).toEqual([]);
+		expect(r.output).toEqual(['55', 'failed as expected']);
+	});
+
+	it('a var declared outside the condition but written inside still rolls back', async () => {
+		const r = await run(`
+var Outer : int = 5
+if (set Outer += 10, Outer > 100):
+    Print("wrong")
+Print("{Outer}")
+`);
+		expect(r.errors).toEqual([]);
+		expect(r.output).toEqual(['5']);
+	});
+
+	it('local declared before an inner failure context rolls back its writes', async () => {
+		// Bump's body runs at depth 1; the inner if condition (depth 2)
+		// writes Local, declared at depth 1 -> must journal + roll back.
+		const r = await run(`
+Bump()<decides> : int =
+    var Local : int = 1
+    if (set Local += 100, Local > 1000):
+        Print("wrong")
+    Local
+if (V := Bump[]):
+    Print("{V}")
+`);
+		expect(r.errors).toEqual([]);
+		expect(r.output).toEqual(['1']);
+	});
+
+	it('captured-var writes from a nested function still roll back', async () => {
+		const r = await run(`
+var Count : int = 0
+Outer()<decides> : void =
+    Inner() : void =
+        set Count += 1
+    Inner()
+    Count > 100
+if (Outer[]):
+    Print("wrong")
+Print("{Count}")
+`);
+		expect(r.errors).toEqual([]);
+		expect(r.output).toEqual(['0']);
+	});
+
+	it('loop-iteration redeclaration behaves the same with elision', async () => {
+		const r = await run(`
+var Kept : int = 0
+Check(I : int)<decides> : int =
+    var Doubled : int = I * 2
+    set Doubled += 1
+    Doubled > 5
+    Doubled
+for (I := 1..4):
+    if (V := Check[I]):
+        set Kept += V
+Print("{Kept}")
+`);
+		expect(r.errors).toEqual([]);
+		// I=3 -> 7, I=4 -> 9; earlier iterations fail.
+		expect(r.output).toEqual(['16']);
+	});
+
+	it('condition mutating only its own local compiles and gates correctly', async () => {
+		// The helper's writes are all to its own local, so the failed call
+		// needs no rollback: the variable dies with the failed frame.
+		const r = await run(`
+Big(V : int)<decides> : int =
+    var T : int = V
+    set T += 5
+    T > 10
+    T
+Classify(X : int) : string =
+    if (Big[X]):
+        "big"
+    else:
+        "small"
+Print(Classify(20))
+Print(Classify(1))
+`);
+		expect(r.errors).toEqual([]);
+		expect(r.output).toEqual(['big', 'small']);
+	});
+});

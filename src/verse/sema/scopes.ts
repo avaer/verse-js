@@ -27,7 +27,16 @@ export interface Frame {
 }
 
 type BindingVariant =
-	| { kind: 'local'; name: string; slot: number; frameDepth: number; mutable: boolean; type: VType; frame?: Frame | null }
+	| {
+		kind: 'local'; name: string; slot: number; frameDepth: number; mutable: boolean; type: VType;
+		frame?: Frame | null;
+		/**
+		 * The checker's failure-context depth at the declaration site. When a
+		 * `set` targets this binding from the same frame at the same depth,
+		 * any active transaction predates the slot, so journaling is elided.
+		 */
+		declFailureDepth?: number;
+	}
 	| { kind: 'global'; name: string; slot: number; mutable: boolean; type: VType }
 	| {
 		kind: 'function'; name: string; slot: number; type: VType;

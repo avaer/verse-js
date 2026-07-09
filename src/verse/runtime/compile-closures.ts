@@ -1623,6 +1623,9 @@ class Compiler {
 			if (binding?.kind === 'local') {
 				const depth = sema.frameDepth ?? 0;
 				const slot = binding.slot;
+				// Locals declared at the same failure depth postdate any open
+				// transaction; rollback never restores them, so skip the journal.
+				const journal = !semaOf(stmt).contextLocalWrite;
 				return (env, ctx) => chain(value(env, ctx), (v) => {
 					if (v === FAIL) {
 						return FAIL;
@@ -1631,7 +1634,7 @@ class Compiler {
 					for (let i = 0; i < depth; i++) {
 						e = e.parent as Env;
 					}
-					if (ctx.txn) {
+					if (journal && ctx.txn) {
 						ctx.txn.recordSlot(e.slots, slot);
 					}
 					e.slots[slot] = op === '=' ? copyIfStruct(v as Value) : applyOp(e.slots[slot], v as Value);

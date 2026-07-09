@@ -55,6 +55,12 @@ export interface SemaData {
 	contextWrites?: boolean;
 	/** Per-clause `contextWrites` for an IfExpr's condition lists. */
 	clauseWrites?: boolean[];
+	/**
+	 * True when this `set` targets a local declared in the same frame at the
+	 * same failure-context depth: any active transaction predates the slot,
+	 * so the compiler can skip journaling the write.
+	 */
+	contextLocalWrite?: boolean;
 }
 
 export function semaOf(node: Expr): SemaData {
@@ -134,6 +140,8 @@ class Checker {
 	topLevelStatements: Expr[] = [];
 	moduleScope: Scope;
 	private fnStack: FunctionContext[] = [];
+	/** Active `observeWrites` regions (innermost last). */
+	private writeObservers: { external: boolean }[] = [];
 	private classStack: ClassInfo[] = [];
 	private scope: Scope;
 	private usedPaths: Set<string> = new Set();
@@ -1786,6 +1794,11 @@ class Checker {
 			return;
 		}
 		fn.inferred = unionEffects(fn.inferred, effects);
+		if (effects.writes) {
+			// Conservative interprocedural assumption: a writing callee may
+			// touch state that outlives the enclosing failure context.
+			this.markExternalWrite();
+		}
 		if (effects.suspends && !fn.declaredEffects.suspends) {
 			this.error(
 				"This function suspends; the caller must be marked '<suspends>'",
@@ -2094,6 +2107,7 @@ class Checker {
 			type: declared ?? valueType,
 			frame: this.scope.owningFrame(),
 			declSpan: stmt.span,
+			declFailureDepth: this.currentFn()?.failureDepth ?? 0,
 		});
 		if (!ok) {
 			this.error(`'${stmt.name}' is already defined in this scope`, stmt.span, 'duplicate');
@@ -2112,6 +2126,7 @@ class Checker {
 
 		const target = stmt.target;
 		let targetType: VType = T.unknown;
+		let contextLocal = false;
 		if (target.kind === 'Ident') {
 			const binding = this.scope.lookup(target.name);
 			if (!binding) {
@@ -2121,6 +2136,18 @@ class Checker {
 				if (binding.kind === 'local' && binding.frame) {
 					semaOf(target).frameDepth = this.scope.frameDepthTo(binding.frame);
 					semaOf(target).slot = binding.slot;
+				}
+				if (
+					binding.kind === 'local' &&
+					binding.frame != null && binding.frame === this.scope.owningFrame() &&
+					binding.declFailureDepth !== undefined &&
+					fn && binding.declFailureDepth === fn.failureDepth
+				) {
+					// Declared in this frame at the same failure depth: any
+					// open transaction predates the slot, so a rollback never
+					// needs to restore it.
+					contextLocal = true;
+					semaOf(stmt).contextLocalWrite = true;
 				}
 				if (binding.kind === 'local' || binding.kind === 'global') {
 					if (!binding.mutable) {
@@ -2163,6 +2190,10 @@ class Checker {
 			semaOf(target).callMode = 'index';
 		} else {
 			this.error('Invalid assignment target', stmt.span, 'bad-set-target');
+		}
+
+		if (!contextLocal) {
+			this.markExternalWrite();
 		}
 
 		const valueType = this.checkExpr(stmt.value, targetType.k !== 'unknown' ? targetType : undefined);
@@ -2312,26 +2343,29 @@ class Checker {
 	// =====================================================================
 
 	/**
-	 * Runs a check while watching whether it infers the `writes` effect —
-	 * both direct `set`s and calls to functions whose effects include
-	 * writes. Used to prove failure contexts read-only so the compiler can
-	 * elide their transaction. The surrounding function's inferred effects
-	 * are preserved.
+	 * Runs a check while watching whether it performs a write that a
+	 * transaction would need to journal — direct `set`s to state that
+	 * outlives the context, or calls to functions whose effects include
+	 * writes (conservative). Context-local writes (locals declared inside
+	 * the same context) do not count, so conditions that only mutate their
+	 * own locals still compile without a transaction. `fn.inferred.writes`
+	 * is not touched; effect legality is tracked independently.
 	 */
 	private observeWrites<TResult>(body: () => TResult): { result: TResult; writes: boolean } {
-		const fn = this.currentFn();
-		if (!fn) {
-			return { result: body(), writes: true };
-		}
-		const saved = fn.inferred.writes;
-		fn.inferred.writes = false;
-		let writes = true;
+		const observer = { external: false };
+		this.writeObservers.push(observer);
 		try {
 			const result = body();
-			writes = fn.inferred.writes;
-			return { result, writes };
+			return { result, writes: observer.external };
 		} finally {
-			fn.inferred.writes = writes || saved;
+			this.writeObservers.pop();
+		}
+	}
+
+	/** Flags every active `observeWrites` region as containing a write. */
+	private markExternalWrite(): void {
+		for (const observer of this.writeObservers) {
+			observer.external = true;
 		}
 	}
 

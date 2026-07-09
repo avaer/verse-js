@@ -566,9 +566,88 @@ class Compiler {
 		const fnName = fn.name;
 		const line = fn.span.start.line;
 		const file = this.currentFile;
+		// Simple shape: all-positional parameters, no defaults. These bind
+		// through a specialized fast path with no per-param branching.
+		const isSimple = params.every((p) => !p.named && !p.defaultCode);
+		const paramSlots = params.map((p) => p.slot);
+		const paramCount = params.length;
 
 		return (captureEnv: Env) => {
-			const invoke = (self: Value, args: Value[], ctx: Ctx, named?: Map<string, Value>): unknown => {
+			const runBody = (env: Env, ctx: Ctx): unknown => {
+				if (!body) {
+					return undefined;
+				}
+				if (debug && ctx.shared.debug) {
+					ctx.shared.debug.onEnterFunction(fnName, line, file);
+				}
+				// Scope for `branch` blocks: cancelled when we return.
+				const savedBranchTasks = ctx.branchTasks;
+				const myBranchTasks = hasBranch ? [] : null;
+				if (hasBranch) {
+					ctx.branchTasks = myBranchTasks;
+				}
+				const finish = (r: unknown): unknown => {
+					if (hasBranch) {
+						ctx.branchTasks = savedBranchTasks;
+						for (const t of myBranchTasks as { cancel(): void }[]) {
+							t.cancel();
+						}
+					}
+					if (debug && ctx.shared.debug) {
+						ctx.shared.debug.onLeaveFunction();
+					}
+					return r;
+				};
+				try {
+					const r = body(env, ctx);
+					if (isPromise(r)) {
+						return r.then(finish, (error) => {
+							if (error instanceof ReturnSignal) {
+								return finish(error.value);
+							}
+							finish(undefined);
+							throw error;
+						});
+					}
+					return finish(r);
+				} catch (error) {
+					if (error instanceof ReturnSignal) {
+						return finish(error.value);
+					}
+					finish(undefined);
+					throw error;
+				}
+			};
+
+			const simpleInvoke = (self: Value, args: Value[], ctx: Ctx): unknown => {
+				if (ctx.shared.scheduler.runCancelled) {
+					ctx.task.throwIfCancelled();
+				}
+				const slots = new Array(frameSize);
+				// Tuple splat: F(T) where T matches multiple params.
+				let positional = args;
+				if (positional.length === 1 && paramCount > 1 && positional[0] instanceof VTuple) {
+					positional = (positional[0] as VTuple).elements;
+				}
+				if (positional.length < paramCount) {
+					throw new VerseRuntimeError(`Too few arguments calling '${fnName}'`);
+				}
+				for (let i = 0; i < paramCount; i++) {
+					slots[paramSlots[i]] = copyIfStruct(positional[i]);
+				}
+				if (selfSlot !== undefined) {
+					slots[selfSlot] = self;
+				}
+				const env: Env = {
+					slots,
+					parent: captureEnv,
+					self,
+					names: debug ? names : undefined,
+				};
+				return runBody(env, ctx);
+			};
+
+			const genericInvoke = (self: Value, args: Value[], ctx: Ctx, named?: Map<string, Value>): unknown => {
 				if (ctx.shared.scheduler.runCancelled) {
 					ctx.task.throwIfCancelled();
 				}
@@ -614,59 +693,15 @@ class Compiler {
 				}
 				if (pending) {
 					// Rare: default value suspended; finish binding async.
-					return pending.then(() => runBody());
+					return pending.then(() => runBody(env, ctx));
 				}
 				if (selfSlot !== undefined) {
 					env.slots[selfSlot] = self;
 				}
-				return runBody();
-
-				function runBody(): unknown {
-					if (!body) {
-						return undefined;
-					}
-					if (debug && ctx.shared.debug) {
-						ctx.shared.debug.onEnterFunction(fnName, line, file);
-					}
-					// Scope for `branch` blocks: cancelled when we return.
-					const savedBranchTasks = ctx.branchTasks;
-					const myBranchTasks = hasBranch ? [] : null;
-					if (hasBranch) {
-						ctx.branchTasks = myBranchTasks;
-					}
-					const finish = (r: unknown): unknown => {
-						if (hasBranch) {
-							ctx.branchTasks = savedBranchTasks;
-							for (const t of myBranchTasks as { cancel(): void }[]) {
-								t.cancel();
-							}
-						}
-						if (debug && ctx.shared.debug) {
-							ctx.shared.debug.onLeaveFunction();
-						}
-						return r;
-					};
-					try {
-						const r = body(env, ctx);
-						if (isPromise(r)) {
-							return r.then(finish, (error) => {
-								if (error instanceof ReturnSignal) {
-									return finish(error.value);
-								}
-								finish(undefined);
-								throw error;
-							});
-						}
-						return finish(r);
-					} catch (error) {
-						if (error instanceof ReturnSignal) {
-							return finish(error.value);
-						}
-						finish(undefined);
-						throw error;
-					}
-				}
+				return runBody(env, ctx);
 			};
+
+			const invoke = isSimple ? simpleInvoke : genericInvoke;
 			return new VFunctionValue(fnName, invoke as unknown as (self: Value, args: Value[]) => unknown);
 		};
 	}

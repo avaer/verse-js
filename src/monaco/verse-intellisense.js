@@ -7,35 +7,46 @@
 
 import { symbolDocToMarkdown } from '@/src/verse';
 import { completionsAt, definitionAt, hoverAt } from '@/src/verse/analysis';
-import { ideHost } from '@/src/ide/verse-host';
+import { ideHost, ideWorkspace } from '@/src/ide/verse-host';
 
 const VERSE_LANGUAGE_ID = 'verse';
 
-// Per-model analysis cache: recompile only when the buffer changes.
-// Keeps the last analysis that parsed so completions keep working while
-// the user is mid-edit with a syntax error.
-const analysisCache = new Map();
+// Workspace analysis cache: the whole workspace is re-analyzed only when
+// any file changes (ideWorkspace.version bumps). Per-file lastGood keeps
+// hover/completions working while the user is mid-edit with a syntax
+// error somewhere in the workspace.
+let workspaceCache = { version: -1, analysis: null };
+const lastGoodByFile = new Map();
 
-function getAnalysis(model) {
-	const key = model.uri.toString();
-	const versionId = model.getVersionId();
-	const cached = analysisCache.get(key);
-	if (cached && cached.versionId === versionId) {
-		return cached;
+/** Workspace file name for a Monaco model (models are named by path). */
+function fileNameOf(model) {
+	return model.uri.path.replace(/^\//, '');
+}
+
+function getWorkspaceAnalysis() {
+	if (workspaceCache.version === ideWorkspace.version && workspaceCache.analysis) {
+		return workspaceCache.analysis;
 	}
 	let analysis;
 	try {
-		analysis = ideHost.analyze(model.getValue());
+		analysis = ideHost.analyzeWorkspace(ideWorkspace.fs);
 	} catch {
-		analysis = { ok: false, program: null, moduleScope: null, diagnostics: [] };
+		analysis = { ok: false, files: new Map(), diagnostics: [] };
 	}
-	const entry = {
-		versionId,
-		analysis,
-		lastGood: analysis.ok ? analysis : cached?.lastGood ?? null,
-	};
-	analysisCache.set(key, entry);
-	return entry;
+	workspaceCache = { version: ideWorkspace.version, analysis };
+	if (analysis.ok) {
+		for (const [file, fileAnalysis] of analysis.files) {
+			lastGoodByFile.set(file, fileAnalysis);
+		}
+	}
+	return analysis;
+}
+
+/** The current (or last good) analysis for one model's file. */
+function getAnalysisFor(model) {
+	const file = fileNameOf(model);
+	const workspace = getWorkspaceAnalysis();
+	return workspace.files.get(file) ?? lastGoodByFile.get(file) ?? null;
 }
 
 function spanToRange(monaco, span) {
@@ -71,8 +82,7 @@ export function registerVerseIntellisense(monaco) {
 			}
 
 			// Checker-backed hover: types, signatures, members, locals.
-			const { analysis, lastGood } = getAnalysis(model);
-			const active = analysis.ok ? analysis : lastGood;
+			const active = getAnalysisFor(model);
 			if (active) {
 				const hover = hoverAt(active, position.lineNumber, position.column);
 				if (hover) {
@@ -107,18 +117,25 @@ export function registerVerseIntellisense(monaco) {
 
 	monaco.languages.registerDefinitionProvider(VERSE_LANGUAGE_ID, {
 		provideDefinition(model, position) {
-			const { analysis, lastGood } = getAnalysis(model);
-			const active = analysis.ok ? analysis : lastGood;
+			const active = getAnalysisFor(model);
 			if (!active) {
 				return null;
 			}
-			const span = definitionAt(active, position.lineNumber, position.column);
-			if (!span) {
+			const location = definitionAt(active, position.lineNumber, position.column);
+			if (!location) {
+				return null;
+			}
+			if (location.file !== fileNameOf(model)) {
+				// Cross-file definition: the IDE owns tabs/models, so hand
+				// navigation to it instead of letting Monaco swap models.
+				window.dispatchEvent(new CustomEvent('verse-open-location', {
+					detail: { file: location.file, line: location.span.start.line },
+				}));
 				return null;
 			}
 			return {
 				uri: model.uri,
-				range: spanToRange(monaco, span),
+				range: spanToRange(monaco, location.span),
 			};
 		},
 	});
@@ -163,9 +180,9 @@ export function registerVerseIntellisense(monaco) {
 			const seen = new Set();
 
 			// Scope-aware completions from the checker: everything visible
-			// at the cursor (locals, params, members, globals, natives).
-			const { analysis, lastGood } = getAnalysis(model);
-			const active = analysis.ok ? analysis : lastGood;
+			// at the cursor (locals, params, members, globals, natives) —
+			// including definitions from other workspace files.
+			const active = getAnalysisFor(model);
 			if (active) {
 				const entries = completionsAt(active, position.lineNumber, position.column);
 				for (const entry of entries) {

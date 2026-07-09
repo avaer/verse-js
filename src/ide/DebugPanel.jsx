@@ -58,7 +58,9 @@ export default function DebugPanel({ variables, callStack, pausedLine, tasks }) 
 					>
 						<span className="truncate">{frame.name}</span>
 						{frame.line != null && (
-							<span className="shrink-0 text-[11px] text-[#5a5a5a]">line {frame.line}</span>
+							<span className="shrink-0 text-[11px] text-[#5a5a5a]">
+								{frame.file ? `${frame.file}:${frame.line}` : `line ${frame.line}`}
+							</span>
 						)}
 					</div>
 				))}

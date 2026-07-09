@@ -47,9 +47,21 @@ if (outcome.ok) {
   await run.done;      // run.stop() cancels all tasks
 }
 
+// Multi-file workspaces: pass a path->source object (or a SourceFileSystem)
+// and pick an entry file; the other files act as libraries.
+const ws = host.compileWorkspace({
+  'lib.verse': 'Double(X : int) : int = X * 2',
+  'main.verse': 'Print("{Double(21)}")',
+});
+if (ws.ok) {
+  await host.run(ws, { entry: 'main.verse' }).done;
+}
+// (or: await host.executeWorkspace(files, { entry: 'main.verse' }))
+
 // IDE services, generated from this host's registry:
 const docs = host.docs();               // browsable module documentation
 const analysis = host.analyze(source);  // hoverAt / definitionAt / completionsAt
+const wsAnalysis = host.analyzeWorkspace(files);  // per-file, cross-file-aware
 ```
 
 Hosts are isolated: each `createHost` call gets its own bindings registry,
@@ -95,10 +107,10 @@ and `tests/embedding/host.test.ts` for working examples of each.
 
 | Entry | Contents |
 | --- | --- |
-| `verse-js` | `createHost`, the bindings API, stdlib, docs generation, language services |
+| `verse-js` | `createHost`, the bindings API, stdlib, docs generation, language services, `MemorySourceFs` |
 | `verse-js/extras/uefn` | Optional `/Fortnite.com/Devices` + `/UnrealEngine.com/...Diagnostics` shims |
 | `verse-js/adapters` | `MemoryStorageAdapter`, `LocalStorageAdapter` |
-| `verse-js/adapters/node` | `JsonFileStorageAdapter` (Node `fs`; kept out of browser bundles) |
+| `verse-js/adapters/node` | `JsonFileStorageAdapter`, `NodeSourceFs` (Node `fs`; kept out of browser bundles) |
 | `verse-js/analysis` | Position-based IDE queries (`hoverAt`, `definitionAt`, `completionsAt`) |
 
 `pnpm build:lib` produces the publishable ESM build with `.d.ts` in `dist/`.
@@ -107,7 +119,9 @@ and `tests/embedding/host.test.ts` for working examples of each.
 
 - **Monaco editor** with the official Verse TextMate grammar, live
   diagnostics as squiggles (error-recovering parser + type/effect checker),
-  checker-backed hover/go-to-definition, and scope-aware completions
+  checker-backed hover/go-to-definition, and scope-aware completions —
+  all workspace-wide, so symbols defined in other files resolve too and
+  go-to-definition jumps across tabs
 - **Run button** (F5): lex → parse → check → compile to JS closures →
   execute, with output streaming into the console panel. Straight-line code
   runs synchronously; execution only goes async at real suspension points
@@ -132,8 +146,12 @@ and `tests/embedding/host.test.ts` for working examples of each.
   Reset button clears it (`PersistenceAdapter.clear()`)
 - **Browsable builtin docs**: the docs panel, hovers, and completions are all
   generated from the host's bindings registry, so they never go stale
-- Multi-file workspace (create/rename/delete `.verse` files) persisted to
-  localStorage, resizable panes, streaming console with timestamps and
+- **Multi-file workspace** (create/rename/delete `.verse` files, persisted
+  to localStorage): every run compiles all files together against one
+  shared module scope, with the active file as the entry point — its
+  top-level statements and entry classes run, the rest act as libraries.
+  Breakpoints are per-file and the debugger follows execution into other
+  files. Resizable panes, streaming console with timestamps and
   click-to-jump error locations
 
 ## Getting started
@@ -159,6 +177,8 @@ The editor seeds these example files:
 | `shapes-classes.verse` | classes, inheritance, overrides, enums, `case`, dynamic casts |
 | `race-and-sync.verse` | `race`/`sync`/`spawn`, cancellation, `defer`, simulation time |
 | `generics-options.verse` | parametric functions, option types, extension methods |
+| `math-lib.verse` | a library file: definitions only, called from other files |
+| `multi-file-demo.verse` | multi-file workspaces: calls into `math-lib.verse`, cross-file go-to-definition |
 | `persistent-score.verse` | `weak_map(player, int)` persistence across runs |
 
 ## Language coverage
@@ -207,9 +227,12 @@ src/verse/            the embeddable library (framework-free, Node + browser)
   stdlib/             /Verse.org/* core modules, built via the bindings API
   extras/uefn.ts      optional /Fortnite.com + /UnrealEngine.com shims
   adapters/           storage adapters (memory, localStorage; node.ts: fs)
-  host.ts             createHost / VerseHost: compile, run, execute, docs,
-                      analyze
+  host.ts             createHost / VerseHost: compile, compileWorkspace,
+                      run, execute, docs, analyze
+  vfs.ts              SourceFileSystem + MemorySourceFs (multi-file
+                      workspaces; NodeSourceFs lives in adapters/node)
   analysis.ts         position-based IDE queries over checker results
+                      (single-buffer and workspace-wide)
   docs.ts             documentation generation from a registry
   debug/              DebugSession.ts (breakpoints, stepping, variable +
                       task snapshots; hooks compiled in only for Debug runs)

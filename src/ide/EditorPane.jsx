@@ -41,6 +41,13 @@ export default function EditorPane({
 	const handleMount = (editor, monaco) => {
 		editorRef.current = editor;
 		monacoRef.current = monaco;
+		// Test hook (dev builds only, which is what Playwright runs against):
+		// E2E tests drive editor actions (e.g. go-to-definition) through
+		// these globals since the bundled monaco isn't on window.
+		if (process.env.NODE_ENV !== 'production') {
+			window.__verseEditor = editor;
+			window.__verseMonaco = monaco;
+		}
 
 		editor.onMouseDown((event) => {
 			const target = event.target;

@@ -60,6 +60,55 @@ test('Debug pauses on a breakpoint, shows state, steps, and continues', async ({
 	await expect(page.getByText('Paused on breakpoint')).toHaveCount(0);
 });
 
+test('Multi-file run: the entry file calls into another workspace file', async ({ page }) => {
+	await openIde(page);
+
+	await page.getByText('multi-file-demo.verse', { exact: true }).click();
+	await page.getByRole('button', { name: 'Run', exact: true }).click();
+
+	const consoleOut = page.getByTestId('console-output');
+	await expect(consoleOut.getByText('Average(3.0, 5.0) = 4.0')).toBeVisible();
+	await expect(consoleOut.getByText('Lerp(0.0, 10.0, 0.25) = 2.5')).toBeVisible();
+	await expect(consoleOut.getByText('GoldenRatio = 1.618034')).toBeVisible();
+	await expect(consoleOut.getByText('— Finished —')).toBeVisible();
+});
+
+test('Cross-file go-to-definition opens the defining file tab', async ({ page }) => {
+	await openIde(page);
+
+	await page.getByText('multi-file-demo.verse', { exact: true }).click();
+
+	// Place the cursor on 'Average' and trigger Go to Definition. Average
+	// is defined in math-lib.verse, so the IDE switches tabs.
+	await page.evaluate(() => {
+		const editor = (window as unknown as { __verseEditor?: import('monaco-editor').editor.IStandaloneCodeEditor }).__verseEditor;
+		if (!editor) {
+			throw new Error('Monaco editor not found');
+		}
+		const model = editor.getModel()!;
+		// Target the call site (`Avg := Average(...)`), not the mention of
+		// Average inside comments/strings where no binding resolves.
+		const match = model.findMatches('Average(3.0', false, false, true, null, false)[0];
+		if (!match) {
+			throw new Error('Average call site not found in the demo file');
+		}
+		editor.setPosition({
+			lineNumber: match.range.startLineNumber,
+			column: match.range.startColumn + 1,
+		});
+		editor.focus();
+		editor.trigger('test', 'editor.action.revealDefinition', {});
+	});
+
+	// The tab strip now shows math-lib.verse as the active tab, with the
+	// defining line revealed.
+	const tabs = page.getByTestId('editor-tabs');
+	await expect(tabs.getByText('math-lib.verse')).toBeVisible({ timeout: 10_000 });
+	await expect(
+		page.locator('.monaco-editor .view-lines').getByText('Average(A : float, B : float)'),
+	).toBeVisible();
+});
+
 test('Reset clears persistent weak_map storage', async ({ page }) => {
 	await openIde(page);
 	page.on('dialog', (dialog) => dialog.accept());

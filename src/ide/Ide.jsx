@@ -16,11 +16,25 @@ import DebugPanel from './DebugPanel.jsx';
 import DocsPanel from './DocsPanel.jsx';
 import { loadFiles, saveFiles, loadUiState, saveUiState, makeLogEntry } from './store.js';
 import { VerseRunCancelled, VerseTaskCancelled } from '@/src/verse';
-import { ideHost, idePersistence } from './verse-host';
+import { ideHost, idePersistence, ideWorkspace } from './verse-host';
 import { DebugSession } from '@/src/verse/debug/DebugSession';
 import { EXAMPLE_FILES } from './examples.js';
 
 const MAX_LOG_ENTRIES = 2000;
+
+/** Buckets workspace diagnostics by file (every file gets an entry so
+ * stale markers clear when a file becomes clean). */
+function groupDiagnosticsByFile(diagnostics, fileNames) {
+	const grouped = {};
+	for (const name of fileNames) {
+		grouped[name] = [];
+	}
+	for (const diagnostic of diagnostics) {
+		const file = diagnostic.file ?? fileNames[0];
+		(grouped[file] ??= []).push(diagnostic);
+	}
+	return grouped;
+}
 
 export default function Ide() {
 	// --- workspace state ---
@@ -75,21 +89,19 @@ export default function Ide() {
 		});
 	}, []);
 
-	// --- diagnostics on a debounce while typing ---
+	// --- workspace mirror for Monaco intellisense (cross-file analysis) ---
 	useEffect(() => {
-		if (!activeFile || files[activeFile] === undefined) {
-			return;
-		}
-		const source = files[activeFile];
+		ideWorkspace.setFiles(files);
+	}, [files]);
+
+	// --- diagnostics on a debounce while typing (whole workspace) ---
+	useEffect(() => {
 		const timeout = setTimeout(() => {
-			const result = ideHost.compile(source);
-			setDiagnostics((previous) => ({
-				...previous,
-				[activeFile]: result.diagnostics,
-			}));
+			const result = ideHost.compileWorkspace(files);
+			setDiagnostics(groupDiagnosticsByFile(result.diagnostics, Object.keys(files)));
 		}, 300);
 		return () => clearTimeout(timeout);
-	}, [files, activeFile]);
+	}, [files]);
 
 	// --- file operations ---
 	const openFile = useCallback((name) => {
@@ -167,13 +179,12 @@ export default function Ide() {
 				current.add(line);
 			}
 			const next = { ...previous, [activeFile]: [...current] };
-			// Live-update the running debug session.
-			if (sessionRef.current && runFile === activeFile) {
-				sessionRef.current.setBreakpoints(next[activeFile]);
-			}
+			// Live-update the running debug session (breakpoints are
+			// per-file, so any file's breakpoints can change mid-run).
+			sessionRef.current?.setBreakpoints(next);
 			return next;
 		});
-	}, [activeFile, runFile]);
+	}, [activeFile]);
 
 	// --- execution ---
 	const startRun = useCallback((debugEnabled) => {
@@ -181,16 +192,17 @@ export default function Ide() {
 			return;
 		}
 		const fileName = activeFile;
-		const source = files[fileName];
 
 		appendLog('system', `— ${debugEnabled ? 'Debugging' : 'Running'} ${fileName} —`);
 
-		const result = ideHost.compile(source, { strict: true });
-		setDiagnostics((previous) => ({ ...previous, [fileName]: result.diagnostics }));
+		// Compile the whole workspace: other files act as libraries and the
+		// active file is the entry (its statements/entry classes run).
+		const result = ideHost.compileWorkspace(files, { strict: true });
+		setDiagnostics(groupDiagnosticsByFile(result.diagnostics, Object.keys(files)));
 		if (!result.ok) {
 			for (const diagnostic of result.diagnostics.filter((d) => d.severity === 'error')) {
 				appendLog('error', diagnostic.message, {
-					file: fileName,
+					file: diagnostic.file ?? fileName,
 					line: diagnostic.startLine,
 				});
 			}
@@ -199,10 +211,15 @@ export default function Ide() {
 
 		const session = new DebugSession({
 			debugEnabled,
-			breakpoints: breakpoints[fileName] || [],
+			breakpoints,
 			onPaused: (info) => {
 				setRunState('paused');
 				setPausedInfo(info);
+				// Follow the debugger into other files (e.g. a breakpoint
+				// in a library file the entry file called into).
+				if (info.file && files[info.file] !== undefined) {
+					openFile(info.file);
+				}
 			},
 			onResumed: () => {
 				setRunState('running');
@@ -213,6 +230,7 @@ export default function Ide() {
 		let run;
 		try {
 			run = ideHost.run(result, {
+				entry: fileName,
 				onOutput: (level, text) => appendLog(level, text),
 				debug: debugEnabled ? session : null,
 				persistence: idePersistence,
@@ -244,7 +262,7 @@ export default function Ide() {
 					return;
 				}
 				appendLog('error', `Runtime error: ${error.message}`, {
-					file: fileName,
+					file: run.ctx.file ?? fileName,
 					line: error.line ?? run.ctx.line ?? null,
 				});
 			})
@@ -256,7 +274,7 @@ export default function Ide() {
 				runRef.current = null;
 				setRunFile(null);
 			});
-	}, [activeFile, files, breakpoints, appendLog]);
+	}, [activeFile, files, breakpoints, appendLog, openFile]);
 
 	const stopRun = useCallback(() => {
 		runRef.current?.stop();
@@ -379,9 +397,28 @@ export default function Ide() {
 		setBreakpoints({});
 	}, []);
 
+	// Cross-file go-to-definition (dispatched by the Monaco layer).
+	useEffect(() => {
+		const onOpenLocation = (event) => {
+			const { file, line } = event.detail ?? {};
+			if (!file || files[file] === undefined) {
+				return;
+			}
+			openFile(file);
+			// Reveal after the editor has swapped to the target model.
+			setTimeout(() => {
+				window.dispatchEvent(new CustomEvent('verse-reveal-line', { detail: { line } }));
+			}, 50);
+		};
+		window.addEventListener('verse-open-location', onOpenLocation);
+		return () => window.removeEventListener('verse-open-location', onOpenLocation);
+	}, [files, openFile]);
+
 	const showDebugPanel = debugSession || runState === 'paused';
 	const pausedLineForActiveFile =
-		runState === 'paused' && runFile === activeFile ? pausedInfo?.line ?? null : null;
+		runState === 'paused' && (pausedInfo?.file ?? runFile) === activeFile
+			? pausedInfo?.line ?? null
+			: null;
 
 	return (
 		<div className="flex h-full flex-col overflow-hidden bg-[#181818] text-[#cccccc]">

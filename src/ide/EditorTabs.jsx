@@ -5,7 +5,10 @@ import React from 'react';
 
 export default function EditorTabs({ openTabs, activeFile, onSelectTab, onCloseTab }) {
 	return (
-		<div className="flex h-9 shrink-0 items-stretch overflow-x-auto border-b border-[#2b2b2b] bg-[#181818] select-none">
+		<div
+			data-testid="editor-tabs"
+			className="flex h-9 shrink-0 items-stretch overflow-x-auto border-b border-[#2b2b2b] bg-[#181818] select-none"
+		>
 			{openTabs.map((name) => {
 				const active = name === activeFile;
 				return (

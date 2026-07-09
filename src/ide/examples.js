@@ -175,6 +175,30 @@ Message := if (S := NoScore?) then "{S}" else "no score yet"
 Print(Message.Shout())
 `,
 
+	'math-lib.verse': `# Shared helpers for multi-file-demo.verse. The IDE compiles every file
+# in the workspace together (one shared module scope), so other files can
+# call these directly — no import needed for same-workspace definitions.
+
+GoldenRatio : float = 1.618034
+
+Average(A : float, B : float) : float = (A + B) / 2.0
+
+Lerp(A : float, B : float, T : float) : float = A + (B - A) * T
+`,
+
+	'multi-file-demo.verse': `# Multi-file workspaces: this file calls functions defined in
+# math-lib.verse. Press Run with this file active — it becomes the entry
+# point and the rest of the workspace acts as a library. Try Ctrl+Click
+# on the call below to jump to the defining file.
+
+Avg := Average(3.0, 5.0)
+Mid := Lerp(0.0, 10.0, 0.25)
+
+Print("Average(3.0, 5.0) = {Avg}")
+Print("Lerp(0.0, 10.0, 0.25) = {Mid}")
+Print("GoldenRatio = {GoldenRatio}")
+`,
+
 	'persistent-score.verse': `using { /Fortnite.com/Devices }
 using { /Verse.org/Simulation }
 using { /Verse.org/Random }

@@ -51,16 +51,46 @@ operations:
 
 | Method | Purpose |
 | --- | --- |
-| `host.compile(source, { strict? })` | lex + parse + check; returns `CompileOutcome` with editor-shaped diagnostics |
+| `host.compile(source, { strict? })` | lex + parse + check one buffer; returns `CompileOutcome` with editor-shaped diagnostics |
+| `host.compileWorkspace(fs, { strict? })` | same over a multi-file workspace (a `SourceFileSystem` or plain path→source object) |
 | `host.prepare(outcome, { debug? })` | closure-compile a checked program (compile once, run many) |
 | `host.run(outcomeOrCompiled, options)` | start execution on a fresh scheduler; returns a `VerseRun` handle |
 | `host.execute(source, options)` | strict compile + run to completion; collects output/errors |
-| `host.docs()` / `host.analyze(source)` | documentation and IDE language services generated from this host's registry |
+| `host.executeWorkspace(fs, { entry, ... })` | strict workspace compile + run one entry file to completion |
+| `host.docs()` / `host.analyze(source)` / `host.analyzeWorkspace(fs)` | documentation and IDE language services generated from this host's registry |
 
 Compilation is *tolerant* by default: type/effect errors are reported as
 diagnostics but don't flip `ok` to false (an IDE wants live diagnostics
 while typing). `strict: true` (used by `execute`) refuses to run programs
 with errors.
+
+### Workspaces (multi-file compilation)
+
+A workspace is any `SourceFileSystem` (`vfs.ts`) — a synchronous snapshot
+view with `listFiles()` and `readFile(path)`. `MemorySourceFs` (core) is
+the Map-backed default; `NodeSourceFs` (`verse-js/adapters/node`) reads a
+directory of `.verse` files; a plain `Record<string, string>` is accepted
+anywhere a filesystem is. Hosts with async storage load a snapshot into a
+`MemorySourceFs` first, because compilation is synchronous.
+
+`compileWorkspace` parses each file separately (tolerant, diagnostics
+tagged with their `file`), then `checkWorkspace` hoists **all top-level
+definitions from all files into one shared module scope** before checking
+any bodies — so files can reference each other in any order, with no
+import statement needed for same-workspace definitions. Duplicate
+top-level names across files are errors that name both files. `using`
+imports currently land in the shared scope too (a documented deviation
+from per-file scoping). Bindings, class members, and entry classes record
+their `declFile` for cross-file go-to-definition.
+
+**Entry semantics** (`run(outcome, { entry })`): classes, functions, and
+global initializers from *every* file are set up in file order, then only
+the entry file's top-level statements and entry-point classes execute —
+other files act as libraries. Omitting `entry` runs every file in order
+(the single-file behavior). Compiled statements carry `{file, line}`, the
+running `Ctx` exposes both, and `DebugSession` takes per-file breakpoints
+(`Record<file, lines[]>`) with `PausedInfo`/call-stack frames reporting
+the file they're in.
 
 ## Frontend
 
@@ -241,13 +271,18 @@ weak_map data. Session identity (e.g. `GetLocalPlayer()`) uses stable
 
 `analysis.ts` provides position-based queries over a compile outcome:
 `hoverAt` (checked types/signatures as markdown), `definitionAt`
-(declaration spans recorded on bindings), and `completionsAt` (all names
-visible in the scope chain at the cursor, shadowing respected). The
-checker records the active `Scope` and resolved member info on each AST
-node's `sema` bag while checking, so these queries are lookups, not
-re-analysis. `host.analyze(source)` is cheap enough to run per keystroke;
-the Monaco layer caches per model version and keeps the last good analysis
-so intellisense survives mid-edit syntax errors.
+(declaration `{file, span}` locations recorded on bindings), and
+`completionsAt` (all names visible in the scope chain at the cursor,
+shadowing respected). The checker records the active `Scope` and resolved
+member info on each AST node's `sema` bag while checking, so these
+queries are lookups, not re-analysis. `host.analyze(source)` is cheap
+enough to run per keystroke; `host.analyzeWorkspace(fs)` returns a
+`WorkspaceAnalysis` — one `SourceAnalysis` per file over the shared
+module scope, so queries resolve symbols defined in other files. The
+Monaco layer analyzes the whole IDE workspace (cached on a workspace
+version, with per-file last-good fallbacks so intellisense survives
+mid-edit syntax errors) and hands cross-file definition jumps to the IDE
+shell, which owns tabs and models.
 
 `docs.ts` generates `ModuleDoc`/`SymbolDoc` structures from a registry —
 the docs panel, hover fallbacks, and `using`-path completions all read
@@ -267,7 +302,8 @@ from it.
 | Control time (tests, replays) | pass a `Clock` (e.g. `VirtualClock`) to `run` |
 | Deterministic randomness | pass `rng` to `run` |
 | Build a debugger UI | implement `DebugHooks` (see `debug/DebugSession.ts`) |
-| Build editor tooling | `host.analyze` + `hoverAt`/`definitionAt`/`completionsAt`, `host.docs()` |
+| Build editor tooling | `host.analyze`/`host.analyzeWorkspace` + `hoverAt`/`definitionAt`/`completionsAt`, `host.docs()` |
+| Compile a multi-file project | `host.compileWorkspace` with a `SourceFileSystem` (or implement your own) |
 
 ## Repository layout
 

@@ -1831,13 +1831,21 @@ class Compiler {
 		interface GenSpec {
 			slot: number;
 			valueSlot: number | null;
-			iterable: Code;
+			iterable: Code | null;
+			/** Integer range generator: iterate numerically, no array. */
+			range: { low: Code; high: Code } | null;
 		}
-		const generators: GenSpec[] = expr.generators.map((g) => ({
-			slot: (g as { sema?: SemaData }).sema?.slot ?? -1,
-			valueSlot: (g as { semaValue?: SemaData }).semaValue?.slot ?? null,
-			iterable: this.compileExpr(g.iterable),
-		}));
+		const generators: GenSpec[] = expr.generators.map((g) => {
+			const isLazyRange = g.iterable.kind === 'RangeExpr' && !g.valueName;
+			return {
+				slot: (g as { sema?: SemaData }).sema?.slot ?? -1,
+				valueSlot: (g as { semaValue?: SemaData }).semaValue?.slot ?? null,
+				iterable: isLazyRange ? null : this.compileExpr(g.iterable),
+				range: isLazyRange && g.iterable.kind === 'RangeExpr'
+					? { low: this.compileExpr(g.iterable.low), high: this.compileExpr(g.iterable.high) }
+					: null,
+			};
+		});
 		if (this.fnCtx.names) {
 			expr.generators.forEach((g, i) => {
 				const spec = generators[i];
@@ -1859,13 +1867,31 @@ class Compiler {
 		return (env, ctx) => {
 			const results: Value[] = [];
 
-			// Resolve iterables up front (each may be async).
+			// Resolve iterables up front (each may be async). Range
+			// generators resolve to numeric bounds; no array is built.
 			const iterables: (Value[] | [Value, Value][])[] = [];
+			const bounds: [number, number][] = [];
 			const resolveIter = (index: number): unknown => {
 				if (index >= generators.length) {
 					return runProduct(0);
 				}
-				const r = generators[index].iterable(env, ctx);
+				const gen = generators[index];
+				if (gen.range) {
+					const { low, high } = gen.range;
+					return chain(low(env, ctx), (lo) => {
+						if (lo === FAIL) {
+							return results;
+						}
+						return chain(high(env, ctx), (hi) => {
+							if (hi === FAIL) {
+								return results;
+							}
+							bounds[index] = [lo as number, hi as number];
+							return resolveIter(index + 1);
+						});
+					});
+				}
+				const r = (gen.iterable as Code)(env, ctx);
 				return chain(r, (value) => {
 					if (value === FAIL) {
 						// Failing generator: zero iterations.
@@ -1882,6 +1908,20 @@ class Compiler {
 					return runFiltersAndBody();
 				}
 				const gen = generators[genIndex];
+				if (gen.range) {
+					const [lo, hi] = bounds[genIndex];
+					const iterateRange = (from: number): unknown => {
+						for (let v = from; v <= hi; v++) {
+							env.slots[gen.slot] = v;
+							const r = runProduct(genIndex + 1);
+							if (isPromise(r)) {
+								return r.then(() => iterateRange(v + 1));
+							}
+						}
+						return undefined;
+					};
+					return iterateRange(lo);
+				}
 				const items = iterables[genIndex];
 				const iterate = (itemIndex: number): unknown => {
 					for (let i = itemIndex; i < items.length; i++) {
@@ -1913,7 +1953,7 @@ class Compiler {
 				});
 			};
 
-			const runFiltersAndBody = (): unknown => {
+			const runFiltersAndBody = filters.length === 0 ? runBody : (): unknown => {
 				if (!filtersCanWrite) {
 					// Read-only (or absent) filters: a FAIL just skips the
 					// combo; nothing needs rolling back.

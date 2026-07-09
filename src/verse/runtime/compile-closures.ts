@@ -1274,13 +1274,7 @@ class Compiler {
 		// must be decided statically: float / float is plain IEEE division,
 		// not the failable int/int -> rational form.
 		if (op === '/' && (semaOf(expr.left).type?.k === 'float' || semaOf(expr.right).type?.k === 'float')) {
-			return (env, ctx) => chain(left(env, ctx), (l) => {
-				if (l === FAIL) {
-					return FAIL;
-				}
-				return chain(right(env, ctx), (r) =>
-					r === FAIL ? FAIL : (l as number) / (r as number));
-			});
+			return (env, ctx) => evalBinary(left, right, env, ctx, floatDivide);
 		}
 		// string + float concatenation: format the float side with its
 		// trailing ".0" (same static-type reasoning as division above).
@@ -1290,34 +1284,15 @@ class Compiler {
 			((leftKind === 'string' && rightKind === 'float') ||
 				(leftKind === 'float' && rightKind === 'string'))) {
 			const floatOnLeft = leftKind === 'float';
-			return (env, ctx) => chain(left(env, ctx), (l) => {
-				if (l === FAIL) {
-					return FAIL;
-				}
-				return chain(right(env, ctx), (r) => {
-					if (r === FAIL) {
-						return FAIL;
-					}
-					return floatOnLeft
-						? verseFloatToString(l as Value) + (r as string)
-						: (l as string) + verseFloatToString(r as Value);
-				});
-			});
+			const concat: BinaryFn = floatOnLeft
+				? (l, r) => verseFloatToString(l) + (r as string)
+				: (l, r) => (l as string) + verseFloatToString(r);
+			return (env, ctx) => evalBinary(left, right, env, ctx, concat);
 		}
 		// Pick the operator implementation once at compile time: statically
 		// numeric/string operands skip applyBinary's dynamic dispatch.
 		const apply = selectBinaryOp(op, leftKind, rightKind, line);
-		return (env, ctx) => chain(left(env, ctx), (l) => {
-			if (l === FAIL) {
-				return FAIL;
-			}
-			return chain(right(env, ctx), (r) => {
-				if (r === FAIL) {
-					return FAIL;
-				}
-				return apply(l as Value, r as Value);
-			});
-		});
+		return (env, ctx) => evalBinary(left, right, env, ctx, apply);
 	}
 
 	// =====================================================================
@@ -1395,6 +1370,40 @@ class Compiler {
 			.filter((a) => a.name !== null)
 			.map((a) => ({ name: a.name as string, code: this.compileExpr(a.value) }));
 
+		// Sync-first fast path for the common shape (no named arguments):
+		// callee and argument evaluation allocate no continuation closures
+		// unless something actually suspends.
+		if (namedArgs.length === 0) {
+			return (env, ctx) => {
+				const c = callee(env, ctx);
+				if (isPromise(c)) {
+					return c.then((cv) => {
+						if (cv === FAIL) {
+							return FAIL;
+						}
+						return chain(positionalArgs(env, ctx), (args) =>
+							args === FAIL
+								? FAIL
+								: dispatchCall(cv as Value, args as Value[], undefined, ctx, failable, line));
+					});
+				}
+				if (c === FAIL) {
+					return FAIL;
+				}
+				const args = positionalArgs(env, ctx);
+				if (isPromise(args)) {
+					return args.then((a) =>
+						a === FAIL
+							? FAIL
+							: dispatchCall(c as Value, a as Value[], undefined, ctx, failable, line));
+				}
+				if (args === FAIL) {
+					return FAIL;
+				}
+				return dispatchCall(c as Value, args as Value[], undefined, ctx, failable, line);
+			};
+		}
+
 		return (env, ctx) => chain(callee(env, ctx), (calleeValue) => {
 			if (calleeValue === FAIL) {
 				return FAIL;
@@ -1402,10 +1411,6 @@ class Compiler {
 			return chain(positionalArgs(env, ctx), (args) => {
 				if (args === FAIL) {
 					return FAIL;
-				}
-				// Named arguments (rare; evaluated after positional).
-				if (namedArgs.length === 0) {
-					return dispatchCall(calleeValue as Value, args as Value[], undefined, ctx, failable, line);
 				}
 				const named = new Map<string, Value>();
 				const evalNamed = (index: number): unknown => {
@@ -1496,12 +1501,16 @@ class Compiler {
 		}
 
 		const target = this.compileExpr(expr.target);
-		return (env, ctx) => chain(target(env, ctx), (t) => {
+		return (env, ctx) => {
+			const t = target(env, ctx);
+			if (isPromise(t)) {
+				return t.then((tv) => (tv === FAIL ? FAIL : memberValue(tv as Value, name, ctx)));
+			}
 			if (t === FAIL) {
 				return FAIL;
 			}
 			return memberValue(t as Value, name, ctx);
-		});
+		};
 	}
 
 	private compileArchetype(expr: Archetype): Code {
@@ -1782,18 +1791,21 @@ class Compiler {
 		const elseBody = expr.elseBody ? this.compileExpr(expr.elseBody) : null;
 
 		return (env, ctx) => {
+			// Sync-first: iterate clauses in a loop; only fall back to a
+			// promise continuation when a condition actually suspends.
 			const tryClause = (index: number): unknown => {
-				if (index >= clauses.length) {
-					return elseBody ? elseBody(env, ctx) : undefined;
-				}
-				const clause = clauses[index];
-				const r = clause.conditions(env, ctx);
-				return chain(r, (result) => {
-					if (result === FAIL) {
-						return tryClause(index + 1);
+				for (let i = index; i < clauses.length; i++) {
+					const clause = clauses[i];
+					const r = clause.conditions(env, ctx);
+					if (isPromise(r)) {
+						return r.then((result) =>
+							result === FAIL ? tryClause(i + 1) : clause.body(env, ctx));
 					}
-					return clause.body(env, ctx);
-				});
+					if (r !== FAIL) {
+						return clause.body(env, ctx);
+					}
+				}
+				return elseBody ? elseBody(env, ctx) : undefined;
 			};
 			return tryClause(0);
 		};
@@ -2207,6 +2219,37 @@ function indexValue(target: Value, index: Value): Value | typeof FAIL {
 }
 
 type BinaryFn = (l: Value, r: Value) => Value | typeof FAIL;
+
+const floatDivide: BinaryFn = (l, r) => (l as number) / (r as number);
+
+/**
+ * Sync-first binary evaluation: the common all-synchronous path runs with
+ * no closure allocation at all; promise continuations are only built when
+ * an operand actually suspends.
+ */
+function evalBinary(left: Code, right: Code, env: Env, ctx: Ctx, apply: BinaryFn): unknown {
+	const l = left(env, ctx);
+	if (isPromise(l)) {
+		return l.then((lv) => {
+			if (lv === FAIL) {
+				return FAIL;
+			}
+			return chain(right(env, ctx), (rv) =>
+				rv === FAIL ? FAIL : apply(lv as Value, rv as Value));
+		});
+	}
+	if (l === FAIL) {
+		return FAIL;
+	}
+	const r = right(env, ctx);
+	if (isPromise(r)) {
+		return r.then((rv) => (rv === FAIL ? FAIL : apply(l as Value, rv as Value)));
+	}
+	if (r === FAIL) {
+		return FAIL;
+	}
+	return apply(l as Value, r as Value);
+}
 
 /**
  * Compile-time operator selection. When the checker proved both operands

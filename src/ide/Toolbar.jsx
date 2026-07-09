@@ -34,6 +34,8 @@ export default function Toolbar({
 	onStepOver,
 	onStepInto,
 	onStepOut,
+	docsOpen,
+	onToggleDocs,
 }) {
 	const idle = runState === 'idle';
 	const paused = runState === 'paused';
@@ -116,6 +118,19 @@ export default function Toolbar({
 				{runState === 'running' && (debugSession ? 'Debugging…' : 'Running…')}
 				{runState === 'paused' && 'Paused on breakpoint'}
 			</span>
+
+			<button
+				title="Builtin library reference"
+				onClick={onToggleDocs}
+				className={`flex items-center gap-1.5 rounded px-2.5 py-1 text-xs transition-colors
+					${docsOpen ? 'bg-[#2a2d2e] text-white' : 'text-[#cccccc] hover:bg-[#2a2d2e]'}`}
+			>
+				<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
+					<path d="M3 2h6a2 2 0 0 1 2 2v10l-1-.6a3 3 0 0 0-3-.02L3 14V2z" opacity="0.55" />
+					<path d="M4 1h6a3 3 0 0 1 3 3v10h-1.5V4A1.5 1.5 0 0 0 10 2.5H4V1z" />
+				</svg>
+				Docs
+			</button>
 		</div>
 	);
 }

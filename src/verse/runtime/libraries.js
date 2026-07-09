@@ -4,6 +4,10 @@
 // Vendorized from johanfortus/Verse-Online-Editor (MIT) and extended with
 // /Verse.org/Simulation's Sleep (a `suspends` native mapped onto an awaited
 // timeout) and explicit "not implemented" stubs for UEFN-only APIs.
+//
+// Symbols carry documentation metadata (doc, paramNames, module description).
+// The IDE's Docs panel, editor hovers, and completions are all generated from
+// this registry - see ./docs.js.
 
 import { VerseFailure } from './failure.js';
 
@@ -14,7 +18,8 @@ class VerseNotImplementedError extends Error {
 	}
 }
 
-function createNativeFunction(name, parameters, returnType, invoke, effects = [], overloads = null) {
+function createNativeFunction(name, parameters, returnType, invoke, options = {}) {
+	const { effects = [], overloads = null, doc = '', paramNames = null, example = '' } = options;
 	return {
 		metadata: {
 			type: 'NativeFunction',
@@ -23,6 +28,9 @@ function createNativeFunction(name, parameters, returnType, invoke, effects = []
 			returnType,
 			effects,
 			overloads,
+			doc,
+			paramNames,
+			example,
 		},
 		runtime: {
 			invoke,
@@ -30,10 +38,10 @@ function createNativeFunction(name, parameters, returnType, invoke, effects = []
 	};
 }
 
-function createNotImplementedFunction(name, parameters, returnType, effects = []) {
+function createNotImplementedFunction(name, parameters, returnType, options = {}) {
 	return createNativeFunction(name, parameters, returnType, () => {
 		throw new VerseNotImplementedError(name);
-	}, effects);
+	}, options);
 }
 
 function convertFailableFloatToInt(name, value, convert) {
@@ -57,14 +65,18 @@ function shuffleArray(values) {
 
 const VERSE_LIBRARY_REGISTRY = {
 	'/Fortnite.com/Devices': {
+		description: 'Creative device classes. In UEFN this module exposes the full device API; here it provides the creative_device base class that serves as the program entry point.',
 		exports: {
 			creative_device: {
 				type: 'NativeClass',
 				name: 'creative_device',
+				doc: 'Base class for creative devices. Every class extending creative_device is instantiated when the program runs, and its OnBegin<override>()<suspends> method is invoked as the entry point.',
+				example: 'my_device := class(creative_device):\n    OnBegin<override>()<suspends> : void =\n        Print("Hello!")',
 			},
 		},
 	},
 	'/Verse.org/Simulation': {
+		description: 'Simulation and time control. Sleep is fully supported; playspace APIs are UEFN-only stubs.',
 		exports: {
 			// Sleep is a `suspends` native. The async interpreter awaits its
 			// promise, so Verse coroutine code maps directly onto JS async.
@@ -76,24 +88,42 @@ const VERSE_LIBRARY_REGISTRY = {
 					const clampedMs = Math.max(0, Number(seconds) * 1000);
 					setTimeout(resolve, clampedMs);
 				}),
-				['suspends'],
+				{
+					effects: ['suspends'],
+					paramNames: ['Seconds'],
+					doc: 'Suspends the current invocation for Seconds seconds. Output printed before a Sleep appears immediately; execution resumes after the delay. Pressing Stop interrupts an in-progress Sleep.',
+					example: 'Print("3...")\nSleep(1.0)\nPrint("2...")',
+				},
 			),
-			GetPlayspace: createNotImplementedFunction('GetPlayspace', [], 'void'),
+			GetPlayspace: createNotImplementedFunction('GetPlayspace', [], 'void', {
+				doc: 'Returns the playspace the device belongs to. Not implemented in verse-js (UEFN-only); calling it raises a runtime error.',
+			}),
 		},
 	},
 	'/Verse.org/Random': {
+		description: 'Pseudo-random number utilities.',
 		exports: {
 			GetRandomFloat: createNativeFunction(
 				'GetRandomFloat',
 				['float', 'float'],
 				'float',
-				(min, max) => Math.random() * (max - min) + min
+				(min, max) => Math.random() * (max - min) + min,
+				{
+					paramNames: ['Min', 'Max'],
+					doc: 'Returns a uniformly distributed random float in the range [Min, Max).',
+					example: 'Chance := GetRandomFloat(0.0, 1.0)',
+				},
 			),
 			GetRandomInt: createNativeFunction(
 				'GetRandomInt',
 				['int', 'int'],
 				'int',
-				(min, max) => Math.floor(Math.random() * (max - min + 1)) + min
+				(min, max) => Math.floor(Math.random() * (max - min + 1)) + min,
+				{
+					paramNames: ['Min', 'Max'],
+					doc: 'Returns a uniformly distributed random int in the inclusive range [Min, Max].',
+					example: 'Roll := GetRandomInt(1, 6)',
+				},
 			),
 			Shuffle: createNativeFunction(
 				'Shuffle',
@@ -105,52 +135,81 @@ const VERSE_LIBRARY_REGISTRY = {
 					}
 
 					return shuffleArray(values);
-				}
+				},
+				{
+					paramNames: ['Values'],
+					doc: 'Returns a new array containing the elements of Values in a random order. The input array is not modified.',
+					example: 'Deck := Shuffle(Cards)',
+				},
 			),
 		},
 	},
 	'/UnrealEngine.com/Temporary/Diagnostics': {
+		description: 'Diagnostic output. Print is implemented as a built-in statement in this interpreter, so importing this module is accepted for compatibility but adds no symbols.',
 		// Print is a grammar-level statement in this implementation; it routes
-		// through the interpreter's output sink (the IDE console).
+		// through the interpreter's output sink (the IDE console). A synthetic
+		// docs entry for it is added in docs.js.
 		exports: {},
 	},
 	'/UnrealEngine.com/Temporary/SpatialMath': {
+		description: 'Vectors, rotations, and transforms. UEFN-only; accepted for compatibility but no symbols are available in verse-js.',
 		exports: {},
 	},
 	'/Verse.org/Verse': {
+		description: 'The language prelude: core math and conversion functions. Implicitly imported into every file - no using declaration needed.',
 		exports: {
 			Floor: createNativeFunction(
 				'Floor',
 				['float'],
 				'int',
 				value => convertFailableFloatToInt('Floor', value, Math.floor),
-				['decides'],
-				[
-					{ parameterTypes: ['int'], returnType: 'int', effects: [] },
-					{ parameterTypes: ['rational'], returnType: 'int', effects: [] },
-					{ parameterTypes: ['float'], returnType: 'int', effects: ['decides'] },
-				],
+				{
+					effects: ['decides'],
+					paramNames: ['Value'],
+					doc: 'Rounds Value down to the nearest int. The float overload has the decides effect (it fails on non-finite values), so call it as Floor[X] inside a failure context. The int and rational overloads never fail.',
+					example: 'if (Whole := Floor[3.7]):\n    Print("{Whole}")  # 3',
+					overloads: [
+						{ parameterTypes: ['int'], returnType: 'int', effects: [] },
+						{ parameterTypes: ['rational'], returnType: 'int', effects: [] },
+						{ parameterTypes: ['float'], returnType: 'int', effects: ['decides'] },
+					],
+				},
 			),
 			Ceil: createNativeFunction(
 				'Ceil',
 				['float'],
 				'int',
 				value => convertFailableFloatToInt('Ceil', value, Math.ceil),
-				['decides'],
+				{
+					effects: ['decides'],
+					paramNames: ['Value'],
+					doc: 'Rounds Value up to the nearest int. Has the decides effect (fails on non-finite values); call as Ceil[X] inside a failure context.',
+					example: 'if (Whole := Ceil[3.2]):\n    Print("{Whole}")  # 4',
+				},
 			),
 			Round: createNativeFunction(
 				'Round',
 				['float'],
 				'int',
 				value => convertFailableFloatToInt('Round', value, Math.round),
-				['decides'],
+				{
+					effects: ['decides'],
+					paramNames: ['Value'],
+					doc: 'Rounds Value to the nearest int. Has the decides effect (fails on non-finite values); call as Round[X] inside a failure context.',
+					example: 'if (Whole := Round[3.5]):\n    Print("{Whole}")  # 4',
+				},
 			),
 			Int: createNativeFunction(
 				'Int',
 				['float'],
 				'int',
 				value => convertFailableFloatToInt('Int', value, Math.trunc),
-				['decides'],
+				{
+					effects: ['decides'],
+					paramNames: ['Value'],
+					doc: 'Truncates Value toward zero, producing an int. Has the decides effect (fails on non-finite values); call as Int[X] inside a failure context.',
+					example: 'if (Whole := Int[-3.7]):\n    Print("{Whole}")  # -3',
+				},
 			),
 			Mod: createNativeFunction(
 				'Mod',
@@ -163,7 +222,12 @@ const VERSE_LIBRARY_REGISTRY = {
 
 					return ((dividend % divisor) + divisor) % divisor;
 				},
-				['decides'],
+				{
+					effects: ['decides'],
+					paramNames: ['Dividend', 'Divisor'],
+					doc: 'Returns Dividend modulo Divisor (always non-negative). Has the decides effect: fails when Divisor is 0, so call as Mod[A, B] inside a failure context.',
+					example: 'if (Remainder := Mod[7, 3]):\n    Print("{Remainder}")  # 1',
+				},
 			),
 			Quotient: createNativeFunction(
 				'Quotient',
@@ -176,7 +240,12 @@ const VERSE_LIBRARY_REGISTRY = {
 
 					return Math.trunc(dividend / divisor);
 				},
-				['decides'],
+				{
+					effects: ['decides'],
+					paramNames: ['Dividend', 'Divisor'],
+					doc: 'Integer division truncated toward zero. Has the decides effect: fails when Divisor is 0, so call as Quotient[A, B] inside a failure context.',
+					example: 'if (Half := Quotient[7, 2]):\n    Print("{Half}")  # 3',
+				},
 			),
 		},
 	},
@@ -254,4 +323,4 @@ export function getImportedRuntimeBindings(importPaths) {
 	};
 }
 
-export { VERSE_LIBRARY_REGISTRY, VerseNotImplementedError };
+export { VERSE_LIBRARY_REGISTRY, IMPLICITLY_IMPORTED_PATHS, VerseNotImplementedError };

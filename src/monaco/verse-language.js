@@ -7,6 +7,7 @@
 
 import { INITIAL, Registry, parseRawGrammar } from 'vscode-textmate';
 import { loadWASM, OnigScanner, OnigString } from 'vscode-oniguruma';
+import { registerVerseIntellisense } from './verse-intellisense.js';
 import verseTheme from './tm/verse-dark.tmTheme.json';
 import verseGrammar from './tm/verse.tmLanguage.json';
 import languageConfiguration from './tm/language-configuration.json';
@@ -149,6 +150,8 @@ export async function registerVerseLanguage(monaco) {
 	});
 
 	monaco.editor.defineTheme('verse-dark', toMonacoTheme(verseTheme));
+
+	registerVerseIntellisense(monaco);
 
 	const grammar = await getVerseGrammar();
 

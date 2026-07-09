@@ -12,6 +12,7 @@ import EditorTabs from './EditorTabs.jsx';
 import EditorPane from './EditorPane.jsx';
 import Console from './Console.jsx';
 import DebugPanel from './DebugPanel.jsx';
+import DocsPanel from './DocsPanel.jsx';
 import { loadFiles, saveFiles, loadUiState, saveUiState, makeLogEntry } from './store.js';
 import { compileVerse } from '@/src/verse/compile.js';
 import { VerseInterpreter } from '@/src/verse/interpreter.js';
@@ -37,6 +38,7 @@ export default function Ide() {
 	// --- layout state ---
 	const [sidebarWidth, setSidebarWidth] = useState(initialUi.sidebarWidth);
 	const [consoleRatio, setConsoleRatio] = useState(initialUi.consoleRatio);
+	const [docsOpen, setDocsOpen] = useState(!!initialUi.docsOpen);
 	const splitContainerRef = useRef(null);
 
 	// --- run/debug state ---
@@ -62,8 +64,8 @@ export default function Ide() {
 	}, [files]);
 
 	useEffect(() => {
-		saveUiState({ activeFile, openTabs, sidebarWidth, consoleRatio });
-	}, [activeFile, openTabs, sidebarWidth, consoleRatio]);
+		saveUiState({ activeFile, openTabs, sidebarWidth, consoleRatio, docsOpen });
+	}, [activeFile, openTabs, sidebarWidth, consoleRatio, docsOpen]);
 
 	// --- logging ---
 	const appendLog = useCallback((level, text, options) => {
@@ -368,6 +370,8 @@ export default function Ide() {
 				onStepOver={stepOver}
 				onStepInto={stepInto}
 				onStepOut={stepOut}
+				docsOpen={docsOpen}
+				onToggleDocs={() => setDocsOpen((value) => !value)}
 			/>
 
 			<div className="flex min-h-0 flex-1 overflow-hidden">
@@ -439,6 +443,12 @@ export default function Ide() {
 										callStack={pausedInfo?.callStack}
 										pausedLine={pausedInfo?.line}
 									/>
+								</div>
+							)}
+
+							{docsOpen && (
+								<div className="w-80 shrink-0">
+									<DocsPanel onClose={() => setDocsOpen(false)} />
 								</div>
 							)}
 						</div>

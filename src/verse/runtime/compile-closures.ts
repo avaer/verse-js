@@ -24,8 +24,8 @@ import { NativeEntry, NativeRegistry } from './natives/registry';
 import { VerseEvent } from './scheduler';
 import {
 	asRational, canonicalKey, FAIL, isEvent, isTask, Value, VEnumValue, VTask,
-	verseEquals, verseToString, VFunctionValue, VMap, VNativeFunction, VObject,
-	VOption, VRational, VStruct, VTuple, VTypeValue,
+	verseEquals, verseFloatToString, verseToString, VFunctionValue, VMap,
+	VNativeFunction, VObject, VOption, VRational, VStruct, VTuple, VTypeValue,
 } from './values';
 
 export type Code = (env: Env, ctx: Ctx) => unknown;
@@ -1043,8 +1043,16 @@ class Compiler {
 	}
 
 	private compileStringLit(expr: Extract<Expr, { kind: 'StringLit' }>): Code {
+		// The runtime can't tell a float 3.0 from an int 3 (both JS numbers),
+		// so float formatting ("3.0") is decided by the interpolant's static
+		// type, captured per part at compile time.
 		const parts = expr.parts.map((p) =>
-			typeof p === 'string' ? p : this.compileExpr(p));
+			typeof p === 'string'
+				? p
+				: {
+					code: this.compileExpr(p),
+					format: semaOf(p).type?.k === 'float' ? verseFloatToString : verseToString,
+				});
 		if (parts.every((p) => typeof p === 'string')) {
 			const s = parts.join('');
 			return () => s;
@@ -1058,20 +1066,20 @@ class Compiler {
 						result += part;
 						continue;
 					}
-					const r = part(env, ctx);
+					const r = part.code(env, ctx);
 					if (isPromise(r)) {
 						return r.then((v) => {
 							if (v === FAIL) {
 								return FAIL;
 							}
-							result += verseToString(v as Value);
+							result += part.format(v as Value);
 							return build(i + 1);
 						});
 					}
 					if (r === FAIL) {
 						return FAIL;
 					}
-					result += verseToString(r as Value);
+					result += part.format(r as Value);
 				}
 				return result;
 			};
@@ -1220,6 +1228,28 @@ class Compiler {
 					r === FAIL ? FAIL : (l as number) / (r as number));
 			});
 		}
+		// string + float concatenation: format the float side with its
+		// trailing ".0" (same static-type reasoning as division above).
+		const leftKind = semaOf(expr.left).type?.k;
+		const rightKind = semaOf(expr.right).type?.k;
+		if (op === '+' &&
+			((leftKind === 'string' && rightKind === 'float') ||
+				(leftKind === 'float' && rightKind === 'string'))) {
+			const floatOnLeft = leftKind === 'float';
+			return (env, ctx) => chain(left(env, ctx), (l) => {
+				if (l === FAIL) {
+					return FAIL;
+				}
+				return chain(right(env, ctx), (r) => {
+					if (r === FAIL) {
+						return FAIL;
+					}
+					return floatOnLeft
+						? verseFloatToString(l as Value) + (r as string)
+						: (l as string) + verseFloatToString(r as Value);
+				});
+			});
+		}
 		return (env, ctx) => chain(left(env, ctx), (l) => {
 			if (l === FAIL) {
 				return FAIL;
@@ -1280,6 +1310,20 @@ class Compiler {
 			semaOf(expr.callee).memberMode === 'super'
 		) {
 			return this.compileSuperCall(expr);
+		}
+
+		// ToString(float): float formatting is a static-type decision (the
+		// runtime can't tell 3.0 from 3), so specialize the call here.
+		const calleeBinding = semaOf(expr.callee).binding;
+		if (
+			calleeBinding?.kind === 'native' &&
+			calleeBinding.export.name === 'ToString' &&
+			expr.args.length === 1 && expr.args[0].name === null &&
+			semaOf(expr.args[0].value).type?.k === 'float'
+		) {
+			const arg = this.compileExpr(expr.args[0].value);
+			return (env, ctx) => chain(arg(env, ctx), (v) =>
+				v === FAIL ? FAIL : verseFloatToString(v as Value));
 		}
 
 		const callee = this.compileExpr(expr.callee);

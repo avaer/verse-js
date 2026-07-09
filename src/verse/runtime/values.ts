@@ -408,6 +408,15 @@ export function verseToString(v: Value): string {
 	return verseToDiagnostic(v);
 }
 
+/**
+ * Float-specific formatting: integral floats keep a trailing ".0" like real
+ * Verse. Callers must know statically that the value is a float, since the
+ * runtime representation (JS number) can't distinguish 3.0 from 3.
+ */
+export function verseFloatToString(v: Value): string {
+	return typeof v === 'number' ? formatFloat(v) : verseToString(v);
+}
+
 function formatFloat(v: number): string {
 	if (Number.isNaN(v)) {
 		return 'NaN';

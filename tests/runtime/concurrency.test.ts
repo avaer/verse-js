@@ -56,7 +56,7 @@ my_device := class(creative_device):
         TA.Await()
         TB.Await()
         Print("done at {GetSimulationElapsedTime()}s")
-`)).toEqual(['A at 1s', 'B at 2s', 'A at 3s', 'done at 3s']);
+`)).toEqual(['A at 1s', 'B at 2s', 'A at 3s', 'done at 3.0s']);
 	});
 });
 
@@ -77,7 +77,7 @@ my_device := class(creative_device):
             Slow()
         Print("winner: {Winner}")
         Print("time: {GetSimulationElapsedTime()}s")
-`)).toEqual(['winner: fast', 'time: 1s']);
+`)).toEqual(['winner: fast', 'time: 1.0s']);
 	});
 
 	it('runs loser defer blocks on cancellation', async () => {
@@ -112,7 +112,7 @@ my_device := class(creative_device):
             Delayed(3.0, 1)
             Delayed(1.0, 2)
         Print("{Results(0)} {Results(1)} at {GetSimulationElapsedTime()}s")
-`)).toEqual(['1 2 at 3s']);
+`)).toEqual(['1 2 at 3.0s']);
 	});
 });
 

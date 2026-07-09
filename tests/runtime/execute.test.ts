@@ -28,7 +28,7 @@ Print("{1 + 2 * 3}")
 Print("{(1 + 2) * 3}")
 Print("{10 - 3 - 2}")
 Print("{2.5 + 0.5}")
-`)).toEqual(['7', '9', '5', '3']);
+`)).toEqual(['7', '9', '5', '3.0']);
 	});
 
 	it('int division produces rationals and is failable', async () => {

@@ -1,6 +1,6 @@
 # race returns the first clause to finish and cancels the rest.
 #>> winner: fast
-#>> time: 1s
+#>> time: 1.0s
 using { /Verse.org/Simulation }
 using { /Fortnite.com/Devices }
 Fast()<suspends> : string =

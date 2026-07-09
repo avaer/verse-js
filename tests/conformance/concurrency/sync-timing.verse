@@ -1,5 +1,5 @@
 # sync waits for all clauses and returns a tuple of results.
-#>> 1 2 at 3s
+#>> 1 2 at 3.0s
 using { /Verse.org/Simulation }
 using { /Fortnite.com/Devices }
 my_device := class(creative_device):

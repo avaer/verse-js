@@ -1,6 +1,6 @@
 # spawn creates a task; Await joins it. Sleep uses the virtual clock.
-#>> worker at 1s
-#>> joined: 7 at 1s
+#>> worker at 1.0s
+#>> joined: 7 at 1.0s
 using { /Verse.org/Simulation }
 using { /Fortnite.com/Devices }
 Worker()<suspends> : int =

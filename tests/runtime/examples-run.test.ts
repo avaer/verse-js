@@ -77,11 +77,11 @@ describe('bundled examples', () => {
 
 	it('race-and-sync.verse', async () => {
 		const output = await runExample(EXAMPLE_FILES['race-and-sync.verse']);
-		expect(output).toContain('cache finished at 1s');
+		expect(output).toContain('cache finished at 1.0s');
 		expect(output).toContain('race winner: cache');
 		expect(output).toContain('network cleaned up');
-		expect(output).toContain('sync got left and right at 3s');
-		expect(output).not.toContain('network finished at 5s');
+		expect(output).toContain('sync got left and right at 3.0s');
+		expect(output).not.toContain('network finished at 5.0s');
 	});
 
 	it('generics-options.verse', async () => {

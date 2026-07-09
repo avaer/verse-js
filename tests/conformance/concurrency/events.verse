@@ -1,6 +1,6 @@
 # event: Await blocks until Signal; the payload is delivered to waiters.
 #>> waiting
-#>> got 42 at 2s
+#>> got 42 at 2.0s
 using { /Verse.org/Simulation }
 using { /Fortnite.com/Devices }
 my_device := class(creative_device):

@@ -13,9 +13,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Verse IDE",
+  title: "verse-js — Verse for JavaScript",
   description:
-    "A browser IDE that edits, runs, and debugs a subset of Epic Games' Verse programming language.",
+    "An embeddable JavaScript runtime and browser IDE for Epic Games' Verse programming language: transactional failure semantics, structured concurrency, a type/effect checker, and a source-level debugger.",
 };
 
 export default function RootLayout({
@@ -28,7 +28,7 @@ export default function RootLayout({
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className="h-full overflow-hidden">{children}</body>
+      <body className="h-full">{children}</body>
     </html>
   );
 }

@@ -10,7 +10,7 @@ import { expect, Page, test } from '@playwright/test';
 const BREAKPOINT_LINE = 11;
 
 async function openIde(page: Page): Promise<void> {
-	await page.goto('/');
+	await page.goto('/editor');
 	// Monaco is ready once line numbers render (hello-world.verse is the
 	// default active file in a fresh workspace).
 	await expect(page.locator('.monaco-editor .line-numbers').first()).toBeVisible({ timeout: 30_000 });

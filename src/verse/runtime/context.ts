@@ -6,7 +6,7 @@
 import type { NativeRegistry } from '../bindings/registry';
 import { Transaction } from './failure';
 import { Scheduler, Task } from './scheduler';
-import { Value, VFunctionValue } from './values';
+import { Value, VFunctionValue, VMap } from './values';
 
 export type OutputLevel = 'stdout' | 'error' | 'system';
 
@@ -47,6 +47,15 @@ export interface SharedCtx {
 	debug: DebugHooks | null;
 	persistence: PersistenceAdapter | null;
 	persistenceKeys: Map<string, string>;
+	/**
+	 * Persistable maps mutated since the last flush. Writes are batched:
+	 * a `set` marks the map dirty and a queued microtask serializes it
+	 * once, instead of re-serializing the whole map on every write. The
+	 * run's end-of-run flush drains anything still pending.
+	 */
+	dirtyPersistMaps: Set<VMap>;
+	/** True while a microtask flush of `dirtyPersistMaps` is queued. */
+	persistFlushScheduled: boolean;
 	/** Bindings the program was compiled against (native method dispatch). */
 	natives: NativeRegistry | null;
 	extensionMethods: Map<string, VFunctionValue>;

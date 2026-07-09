@@ -16,7 +16,7 @@ import {
 import { EntryClass, SemaData, semaOf, WorkspaceFile } from '../sema/checker';
 import { Binding, NativeExport } from '../sema/scopes';
 import { ClassInfo, VType } from '../sema/types';
-import { Ctx } from './context';
+import { Ctx, SharedCtx } from './context';
 import {
 	BreakSignal, ReturnSignal, Transaction, VerseRuntimeError,
 } from './failure';
@@ -2968,12 +2968,42 @@ function persistIfNeeded(ctx: Ctx, value: Value): void {
 	if (!(value instanceof VMap) || !map.persistName || !ctx.shared.persistence) {
 		return;
 	}
-	const key = ctx.shared.persistenceKeys.get(map.persistName);
-	if (!key) {
+	// Batched: mark dirty and serialize once per microtask instead of on
+	// every write. Also means a rollback inside the same sync section is
+	// never observable in storage (the flush runs after the rollback).
+	const shared = ctx.shared;
+	shared.dirtyPersistMaps.add(value);
+	if (!shared.persistFlushScheduled) {
+		shared.persistFlushScheduled = true;
+		queueMicrotask(() => flushPersistentWrites(shared));
+	}
+}
+
+/**
+ * Serializes and stores every dirty persistable map, then clears the
+ * dirty set. Called from the queued microtask and from the run's
+ * end-of-run flush (so `await run.done` always observes persisted state).
+ */
+export function flushPersistentWrites(shared: SharedCtx): void {
+	shared.persistFlushScheduled = false;
+	const dirty = shared.dirtyPersistMaps;
+	if (dirty.size === 0) {
 		return;
 	}
-	const serialized = JSON.stringify([...map.pairs()].map(([k, v]) => [toJson(k), toJson(v)]));
-	ctx.shared.persistence.store(key, serialized);
+	if (!shared.persistence) {
+		dirty.clear();
+		return;
+	}
+	for (const map of dirty) {
+		const name = (map as VMap & { persistName?: string }).persistName;
+		const key = name ? shared.persistenceKeys.get(name) : undefined;
+		if (!key) {
+			continue;
+		}
+		const serialized = JSON.stringify([...map.pairs()].map(([k, v]) => [toJson(k), toJson(v)]));
+		shared.persistence.store(key, serialized);
+	}
+	dirty.clear();
 }
 
 // --- JSON persistence encoding ---

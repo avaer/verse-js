@@ -62,6 +62,42 @@ my_device := class(creative_device):
 		const third = await testHost.execute(source, { persistence: makeAdapter(store) });
 		expect(third.output).toEqual(['items: 2']);
 	});
+
+	it('batches rapid writes: far fewer stores than writes, final state persisted', async () => {
+		const store = new Map<string, string>();
+		let storeCalls = 0;
+		const adapter = {
+			load: (key: string) => store.get(key) ?? null,
+			store: (key: string, json: string) => {
+				storeCalls += 1;
+				store.set(key, json);
+			},
+		};
+		const source = `
+using { /Verse.org/Simulation }
+using { /Fortnite.com/Devices }
+var Counters : weak_map(player, int) = map{}
+
+my_device := class(creative_device):
+    OnBegin<override>()<suspends> : void =
+        P := GetLocalPlayer()
+        for (I := 1..1000):
+            if (set Counters[P] = I) {}
+        if (Final := Counters[P]):
+            Print("final {Final}")
+`;
+		const result = await testHost.execute(source, { persistence: adapter });
+		expect(result.errors).toEqual([]);
+		expect(result.output).toEqual(['final 1000']);
+		// 1000 writes used to mean 1000 full-map serializations; batching
+		// collapses each sync section into one store (plus the end-of-run
+		// flush).
+		expect(storeCalls).toBeLessThan(10);
+		// The last write is what actually landed in storage.
+		const stored = [...store.values()];
+		expect(stored.length).toBe(1);
+		expect(stored[0]).toContain('1000');
+	});
 });
 
 describe('persistable validation', () => {

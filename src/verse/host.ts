@@ -11,7 +11,7 @@ import { checkWorkspace, CheckResult, NativeCatalog, WorkspaceFile } from './sem
 import { SourceFsLike, toSourceFs } from './vfs';
 import { Diagnostic } from './sema/diagnostics';
 import {
-	compileProgram, CompiledProgram, toJson,
+	compileProgram, CompiledProgram, flushPersistentWrites, toJson,
 } from './runtime/compile-closures';
 import { Ctx, DebugHooks, OutputLevel, PersistenceAdapter, SharedCtx } from './runtime/context';
 import { NativeModuleDef, NativeRegistry } from './bindings/registry';
@@ -171,6 +171,8 @@ export function startRun(
 		debug: options.debug ?? null,
 		persistence: options.persistence ?? null,
 		persistenceKeys: new Map(),
+		dirtyPersistMaps: new Set(),
+		persistFlushScheduled: false,
 		natives: compiled.registry,
 		extensionMethods: new Map(),
 		loopBudget: options.loopBudget ?? 100_000_000,
@@ -194,6 +196,9 @@ export function startRun(
 
 /** Writes persistable weak_maps back to the adapter at end of run. */
 function flushPersistence(shared: SharedCtx): void {
+	// Drain batched writes first so a still-queued microtask flush can't
+	// fire later (e.g. after the embedder clears the adapter).
+	flushPersistentWrites(shared);
 	if (!shared.persistence) {
 		return;
 	}

@@ -3,6 +3,7 @@
 // concurrency strand (it carries the current task and transaction); the
 // `SharedCtx` inside it is per run.
 
+import type { NativeRegistry } from '../bindings/registry';
 import { Transaction } from './failure';
 import { Scheduler, Task } from './scheduler';
 import { Value, VFunctionValue } from './values';
@@ -31,6 +32,8 @@ export interface SharedCtx {
 	debug: DebugHooks | null;
 	persistence: PersistenceAdapter | null;
 	persistenceKeys: Map<string, string>;
+	/** Bindings the program was compiled against (native method dispatch). */
+	natives: NativeRegistry | null;
 	extensionMethods: Map<string, VFunctionValue>;
 	/** Sync-section iteration guard (backedges before an error is thrown). */
 	loopBudget: number;

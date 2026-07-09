@@ -1,14 +1,13 @@
 // verse-intellisense.js
-// Monaco language providers for Verse, backed by the semantic checker
-// (src/verse/ide/analysis.ts): hover shows checked types/signatures,
+// Monaco language providers for Verse, backed by the IDE host's semantic
+// checker (src/verse/analysis.ts): hover shows checked types/signatures,
 // go-to-definition jumps to declarations, and completions are scope-aware
 // (locals, params, class members, natives). Falls back to the static
 // builtin docs index when the source doesn't currently parse.
 
-import { buildSymbolIndex, getModulePaths, symbolDocToMarkdown } from '@/src/verse/runtime/docs';
-import {
-	analyzeVerse, completionsAt, definitionAt, hoverAt,
-} from '@/src/verse/ide/analysis';
+import { symbolDocToMarkdown } from '@/src/verse';
+import { completionsAt, definitionAt, hoverAt } from '@/src/verse/analysis';
+import { ideHost } from '@/src/ide/verse-host';
 
 const VERSE_LANGUAGE_ID = 'verse';
 
@@ -26,7 +25,7 @@ function getAnalysis(model) {
 	}
 	let analysis;
 	try {
-		analysis = analyzeVerse(model.getValue());
+		analysis = ideHost.analyze(model.getValue());
 	} catch {
 		analysis = { ok: false, program: null, moduleScope: null, diagnostics: [] };
 	}
@@ -61,8 +60,8 @@ function completionKindFor(monaco, kind) {
 }
 
 export function registerVerseIntellisense(monaco) {
-	const symbolIndex = buildSymbolIndex();
-	const modulePaths = getModulePaths();
+	const symbolIndex = ideHost.symbolIndex();
+	const modulePaths = ideHost.modulePaths();
 
 	monaco.languages.registerHoverProvider(VERSE_LANGUAGE_ID, {
 		provideHover(model, position) {

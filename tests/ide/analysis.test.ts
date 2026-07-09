@@ -4,8 +4,11 @@
 
 import { describe, expect, it } from 'vitest';
 import {
-	analyzeVerse, completionsAt, definitionAt, hoverAt,
-} from '../../src/verse/ide/analysis';
+	completionsAt, definitionAt, hoverAt,
+} from '../../src/verse/analysis';
+import { testHost } from '../helpers/test-host';
+
+const analyzeVerse = (source: string) => testHost.analyze(source);
 
 const SOURCE = [
 	'Score : int = 42',                          // 1

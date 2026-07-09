@@ -59,13 +59,26 @@ export function semaOf(node: Expr): SemaData {
 
 export interface NativeCatalog {
 	modules: Map<string, { path: string; description: string; exports: Map<string, NativeExport> }>;
+	/** Module paths imported into every program without a `using`. */
+	implicitPaths: string[];
+	/** Entry-point protocols: classes extending `className` run `method`. */
+	entryPoints: { className: string; method: string }[];
+	/** Namespace roots where unknown modules warn instead of erroring. */
+	toleratedRoots: string[];
+}
+
+/** A user class selected as a program entry point by a registered protocol. */
+export interface EntryClass {
+	def: ClassDef;
+	/** Method the runtime invokes on an instance (e.g. 'OnBegin'). */
+	method: string;
 }
 
 export interface CheckResult {
 	diagnostics: Diagnostic[];
 	globalSlotCount: number;
-	/** Entry info: classes extending creative_device with OnBegin, etc. */
-	deviceClasses: ClassDef[];
+	/** Classes matching a registered entry-point protocol, in source order. */
+	entryClasses: EntryClass[];
 	topLevelStatements: Expr[];
 	/** Top-level scope with all module definitions + imported natives. */
 	moduleScope: Scope;
@@ -80,7 +93,7 @@ export function checkProgram(program: Program, natives: NativeCatalog): CheckRes
 	return {
 		diagnostics: checker.diagnostics,
 		globalSlotCount: checker.globalSlotCount,
-		deviceClasses: checker.deviceClasses,
+		entryClasses: checker.entryClasses,
 		topLevelStatements: checker.topLevelStatements,
 		moduleScope: checker.moduleScope,
 	};
@@ -90,7 +103,7 @@ class Checker {
 	diagnostics: Diagnostic[] = [];
 	natives: NativeCatalog;
 	globalSlotCount = 0;
-	deviceClasses: ClassDef[] = [];
+	entryClasses: EntryClass[] = [];
 	topLevelStatements: Expr[] = [];
 	moduleScope: Scope;
 	private fnStack: FunctionContext[] = [];
@@ -127,8 +140,10 @@ class Checker {
 	// =====================================================================
 
 	check(program: Program): void {
-		// Implicit prelude: /Verse.org/Verse is always in scope.
-		this.importNativeModule('/Verse.org/Verse', null);
+		// Implicit modules (the prelude, by default) are always in scope.
+		for (const path of this.natives.implicitPaths) {
+			this.importNativeModule(path, null);
+		}
 
 		// Apply native `using` imports up front so class headers resolving
 		// creative_device/event/... see them regardless of statement order.
@@ -437,8 +452,13 @@ class Checker {
 		}
 		this.scope = previous;
 
-		if (this.classExtendsNative(info, 'creative_device')) {
-			this.deviceClasses.push(stmt);
+		// Entry-point protocols from the registry (e.g. the UEFN extra marks
+		// classes extending creative_device to have OnBegin invoked).
+		for (const entryPoint of this.natives.entryPoints) {
+			if (this.classExtendsNative(info, entryPoint.className)) {
+				this.entryClasses.push({ def: stmt, method: entryPoint.method });
+				break;
+			}
 		}
 	}
 
@@ -536,9 +556,10 @@ class Checker {
 	private importNativeModule(path: string, span: Span | null): boolean {
 		const nativeModule = this.natives.modules.get(path);
 		if (!nativeModule) {
-			// Accept /Fortnite.com/... and /UnrealEngine.com/... paths that we
-			// don't model rather than failing whole programs.
-			if (span && (path.startsWith('/Fortnite.com') || path.startsWith('/UnrealEngine.com'))) {
+			// Registered namespace roots (e.g. /Fortnite.com from the UEFN
+			// extra) tolerate unmodeled paths with a warning rather than
+			// failing whole programs.
+			if (span && this.natives.toleratedRoots.some((root) => path.startsWith(root))) {
 				this.warning(`Module '${path}' is not modeled in this environment; its symbols are unavailable`, span);
 				return true;
 			}

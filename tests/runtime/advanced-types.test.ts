@@ -4,10 +4,10 @@
 // options, and extension methods.
 
 import { describe, expect, it } from 'vitest';
-import { runVerse } from '../../src/verse/pipeline';
+import { testHost } from '../helpers/test-host';
 
 async function run(source: string): Promise<string[]> {
-	const { output, errors } = await runVerse(source);
+	const { output, errors } = await testHost.execute(source);
 	if (errors.length > 0) {
 		throw new Error(`Verse run failed: ${errors.join('\n')}\n--- source ---\n${source}`);
 	}

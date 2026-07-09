@@ -4,24 +4,17 @@
 
 import { describe, expect, it } from 'vitest';
 import { EXAMPLE_FILES } from '../../src/ide/examples.js';
-import { compileProgram, compileVerse, getNativeRegistry, startRun } from '../../src/verse/pipeline';
-import { VirtualClock } from '../../src/verse/runtime/scheduler';
+import { VirtualClock } from '../../src/verse';
+import { testHost } from '../helpers/test-host';
 
 async function runExample(source: string): Promise<string[]> {
-	const outcome = compileVerse(source, { strict: true });
+	const outcome = testHost.compile(source, { strict: true });
 	if (!outcome.ok) {
 		throw new Error(outcome.diagnostics.map((d) => d.message).join('\n'));
 	}
-	const compiled = compileProgram(
-		outcome.program,
-		getNativeRegistry(),
-		outcome.check.globalSlotCount,
-		outcome.check.deviceClasses,
-		{ debug: false },
-	);
 	const output: string[] = [];
 	const clock = new VirtualClock();
-	const run = startRun(compiled, {
+	const run = testHost.run(outcome, {
 		clock,
 		rng: () => 0.5,
 		onOutput: (level, text) => {

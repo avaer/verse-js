@@ -15,10 +15,8 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import {
-	compileProgram, compileVerse, getNativeRegistry, startRun,
-} from '../../src/verse/pipeline';
-import { VirtualClock } from '../../src/verse/runtime/scheduler';
+import { VirtualClock } from '../../src/verse';
+import { testHost } from '../helpers/test-host';
 
 const rootDir = join(fileURLToPath(import.meta.url), '..');
 
@@ -61,19 +59,12 @@ function collectCases(dir: string): string[] {
 }
 
 async function execute(source: string): Promise<string[]> {
-	const outcome = compileVerse(source, { strict: true });
+	const outcome = testHost.compile(source, { strict: true });
 	if (!outcome.ok) {
 		throw new Error(
 			`compile failed:\n${outcome.diagnostics.map((d) => `${d.startLine}: ${d.message}`).join('\n')}`,
 		);
 	}
-	const compiled = compileProgram(
-		outcome.program,
-		getNativeRegistry(),
-		outcome.check.globalSlotCount,
-		outcome.check.deviceClasses,
-		{ debug: false },
-	);
 	const output: string[] = [];
 	const clock = new VirtualClock();
 	// Deterministic RNG: xorshift with a fixed seed.
@@ -84,7 +75,7 @@ async function execute(source: string): Promise<string[]> {
 		seed ^= seed << 5; seed >>>= 0;
 		return seed / 0x100000000;
 	};
-	const run = startRun(compiled, {
+	const run = testHost.run(outcome, {
 		clock,
 		rng,
 		onOutput: (level, text) => {
@@ -117,7 +108,7 @@ describe('conformance corpus', () => {
 		it(name, async () => {
 			if (expectation.errors.length > 0) {
 				// Diagnostics case: compile only (non-strict, like the IDE).
-				const outcome = compileVerse(source);
+				const outcome = testHost.compile(source);
 				const diags = outcome.diagnostics;
 				for (const want of expectation.errors) {
 					const hit = diags.find((d) =>
@@ -147,7 +138,7 @@ describe('conformance corpus', () => {
 			expect(output).toEqual(expectation.stdout);
 
 			if (expectation.warnings.length > 0) {
-				const { diagnostics } = compileVerse(source);
+				const { diagnostics } = testHost.compile(source);
 				for (const want of expectation.warnings) {
 					const hit = diagnostics.find((d) =>
 						d.severity === 'warning' &&

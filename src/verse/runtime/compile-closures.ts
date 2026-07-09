@@ -13,17 +13,16 @@ import {
 	Archetype, Block, Call, CaseExpr, ClassDef, Definition, EnumDef, Expr,
 	ForExpr, FunctionDef, IfExpr, Program, SetExpr, VarDefinition,
 } from '../frontend/ast';
-import { SemaData, semaOf } from '../sema/checker';
+import { EntryClass, SemaData, semaOf } from '../sema/checker';
 import { Binding, NativeExport } from '../sema/scopes';
 import { ClassInfo, VType } from '../sema/types';
 import { Ctx } from './context';
 import {
 	BreakSignal, ReturnSignal, Transaction, VerseRuntimeError,
 } from './failure';
-import { NativeEntry, NativeRegistry } from './natives/registry';
-import { VerseEvent } from './scheduler';
+import { NativeEntry, NativeRegistry } from '../bindings/registry';
 import {
-	asRational, canonicalKey, FAIL, isEvent, isTask, Value, VEnumValue, VTask,
+	asRational, canonicalKey, FAIL, isTask, Value, VEnumValue, VTask,
 	verseEquals, verseFloatToString, verseToString, VFunctionValue, VMap,
 	VNativeFunction, VObject, VOption, VRational, VStruct, VTuple, VTypeValue,
 } from './values';
@@ -96,10 +95,9 @@ export class NativeClassValue extends VTypeValue {
 					return value;
 				}
 			}
-			if (entry.name === 'event' && isEvent(value)) {
-				return value;
-			}
-			if (entry.name === 'task' && isTask(value)) {
+			// Non-object engine values (tasks, events, ...) declare their own
+			// runtime type test through the bindings API.
+			if (entry.matches?.(value)) {
 				return value;
 			}
 			return FAIL;
@@ -109,9 +107,11 @@ export class NativeClassValue extends VTypeValue {
 }
 
 export interface CompiledProgram {
-	/** Initializes globals then runs top-level statements + device OnBegins. */
+	/** Initializes globals then runs top-level statements + entry points. */
 	run(ctx: Ctx): Promise<void>;
 	globalCount: number;
+	/** The bindings the program was compiled against. */
+	registry: NativeRegistry;
 }
 
 export interface CompileOptions {
@@ -122,11 +122,11 @@ export function compileProgram(
 	program: Program,
 	registry: NativeRegistry,
 	globalCount: number,
-	deviceClasses: ClassDef[],
+	entryClasses: EntryClass[],
 	options: CompileOptions,
 ): CompiledProgram {
 	const compiler = new Compiler(registry, options);
-	return compiler.compile(program, globalCount, deviceClasses);
+	return compiler.compile(program, globalCount, entryClasses);
 }
 
 interface FnCompileCtx {
@@ -159,7 +159,7 @@ class Compiler {
 		};
 	}
 
-	compile(program: Program, globalCount: number, deviceClasses: ClassDef[]): CompiledProgram {
+	compile(program: Program, globalCount: number, entryClasses: EntryClass[]): CompiledProgram {
 		// Collect declarations across nested modules, in source order.
 		const classes: ClassDef[] = [];
 		const enums: EnumDef[] = [];
@@ -226,9 +226,12 @@ class Compiler {
 			slot: semaOf(c).slot ?? -1,
 			rc: this.classMap.get(semaOf(c).classInfo as ClassInfo) as RuntimeClass,
 		}));
-		const devices = deviceClasses
-			.map((c) => this.classMap.get(semaOf(c).classInfo as ClassInfo))
-			.filter((rc): rc is RuntimeClass => !!rc);
+		const entries = entryClasses
+			.map((entry) => ({
+				rc: this.classMap.get(semaOf(entry.def).classInfo as ClassInfo),
+				method: entry.method,
+			}))
+			.filter((entry): entry is { rc: RuntimeClass; method: string } => !!entry.rc);
 
 		const run = async (ctx: Ctx): Promise<void> => {
 			const globals = ctx.shared.globals;
@@ -282,13 +285,14 @@ class Compiler {
 				}
 			}
 
-			// 4. Devices: instantiate, then run OnBegin.
-			for (const rc of devices) {
+			// 4. Entry points: instantiate each matching class, then run its
+			// registered entry method (e.g. creative_device.OnBegin).
+			for (const { rc, method } of entries) {
 				const instanceResult = this.instantiate(rc, new Map(), { slots: [], parent: rootEnv, self: undefined }, ctx);
 				const instance = (isPromise(instanceResult) ? await instanceResult : instanceResult) as VObject;
-				const onBegin = rc.methods.get('OnBegin');
-				if (onBegin) {
-					const resolved = resolveMethod(onBegin, ctx);
+				const entryMethod = rc.methods.get(method);
+				if (entryMethod) {
+					const resolved = resolveMethod(entryMethod, ctx);
 					const result = (resolved.invoke as (self: Value, args: Value[], ctx: Ctx) => unknown)(instance, [], ctx);
 					if (isPromise(result)) {
 						await result;
@@ -297,7 +301,7 @@ class Compiler {
 			}
 		};
 
-		return { run, globalCount };
+		return { run, globalCount, registry: this.registry };
 	}
 
 	private isPersistentWeakMap(d: Definition | VarDefinition): boolean {
@@ -2231,36 +2235,13 @@ function memberValue(target: Value, name: string, ctx: Ctx): Value | typeof FAIL
 			return target.size;
 		}
 	}
-	if (isTask(target)) {
-		if (name === 'Await') {
-			return new VNativeFunction('Await', (_args, rawCtx) => {
-				const c = rawCtx as Ctx;
-				return c.task.suspendable(target.awaitResult());
-			});
-		}
-		if (name === 'Cancel') {
-			return new VNativeFunction('Cancel', () => {
-				target.cancel();
-				return undefined;
-			});
-		}
-		if (name === 'IsComplete') {
-			return new VNativeFunction('IsComplete', () => (target.isComplete() ? undefined : FAIL));
-		}
-	}
-	if (isEvent(target)) {
-		if (name === 'Signal') {
-			return new VNativeFunction('Signal', (args) => {
-				(target as VerseEvent).signal(args[0]);
-				return undefined;
-			});
-		}
-		if (name === 'Await') {
-			return new VNativeFunction('Await', (_args, rawCtx) => {
-				const c = rawCtx as Ctx;
-				return c.task.suspendable(target.awaitSignal());
-			});
-		}
+	// Native methods on engine values (tasks, events, ...) resolve through
+	// the bindings registry so extras and embedder modules dispatch the
+	// same way as the standard library.
+	const nativeMethod = ctx.shared.natives?.resolveValueMethod(target, name);
+	if (nativeMethod) {
+		return new VNativeFunction(name, (args, rawCtx) =>
+			nativeMethod(target, args as Value[], rawCtx as Ctx));
 	}
 	const extension = ctx.shared.extensionMethods.get(name);
 	if (extension) {

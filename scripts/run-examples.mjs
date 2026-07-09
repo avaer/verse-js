@@ -3,8 +3,10 @@
 import { readdir, readFile } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { runVerse } from '../src/verse/pipeline.ts';
+import { createHost } from '../src/verse/index.ts';
+import { uefnModules } from '../src/verse/extras/uefn.ts';
 
+const host = createHost({ modules: uefnModules });
 const examplesDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'examples');
 const files = (await readdir(examplesDir)).filter(f => f.endsWith('.verse'));
 let failed = false;
@@ -12,7 +14,7 @@ let failed = false;
 for (const file of files) {
 	const source = await readFile(join(examplesDir, file), 'utf8');
 	console.log(`\n=== ${file} ===`);
-	const { output, errors } = await runVerse(source);
+	const { output, errors } = await host.execute(source);
 	for (const line of output) {
 		console.log('  ', line);
 	}

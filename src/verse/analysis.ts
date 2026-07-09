@@ -2,15 +2,17 @@
 // IDE language services backed by the semantic checker: position -> AST
 // node lookup, hover info, go-to-definition, and scope-aware completions.
 // Framework-agnostic so it can be unit-tested in Node and wired into
-// Monaco providers.
+// Monaco providers. Obtain a SourceAnalysis via `host.analyze(source)`,
+// then query it with `hoverAt` / `definitionAt` / `completionsAt`.
 
-import { Expr, Program } from '../frontend/ast';
-import { Span } from '../frontend/tokens';
-import { semaOf } from '../sema/checker';
-import { compileVerse, IdeDiagnostic } from '../pipeline';
-import { Binding, Scope } from '../sema/scopes';
-import { FuncT, MemberInfo, typeToString } from '../sema/types';
+import { Expr, Program } from './frontend/ast';
+import { Span } from './frontend/tokens';
+import { semaOf } from './sema/checker';
+import type { CompileOutcome, IdeDiagnostic } from './host';
+import { Binding, Scope } from './sema/scopes';
+import { FuncT, MemberInfo, typeToString } from './sema/types';
 
+/** Semantic snapshot of one source buffer, ready for position queries. */
 export interface SourceAnalysis {
 	ok: boolean;
 	program: Program | null;
@@ -18,9 +20,8 @@ export interface SourceAnalysis {
 	diagnostics: IdeDiagnostic[];
 }
 
-/** Parses + checks source for IDE queries. Cheap enough to run per keystroke. */
-export function analyzeVerse(source: string): SourceAnalysis {
-	const outcome = compileVerse(source);
+/** Wraps a compile outcome for IDE queries (used by `host.analyze`). */
+export function analysisFromOutcome(outcome: CompileOutcome): SourceAnalysis {
 	if (!outcome.ok) {
 		return { ok: false, program: null, moduleScope: null, diagnostics: outcome.diagnostics };
 	}

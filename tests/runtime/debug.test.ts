@@ -4,7 +4,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { DebugSession } from '../../src/verse/debug/DebugSession';
-import { compileProgram, compileVerse, getNativeRegistry, startRun } from '../../src/verse/pipeline';
+import { testHost } from '../helpers/test-host';
 
 interface DebugRunResult {
 	output: string[];
@@ -19,17 +19,10 @@ async function runWithDebugger(
 		onPause?: (pause: DebugRunResult['pauses'][number], session: DebugSession) => void;
 	},
 ): Promise<DebugRunResult> {
-	const outcome = compileVerse(source, { strict: true });
+	const outcome = testHost.compile(source, { strict: true });
 	if (!outcome.ok) {
 		throw new Error(outcome.diagnostics.map((d) => d.message).join('\n'));
 	}
-	const compiled = compileProgram(
-		outcome.program,
-		getNativeRegistry(),
-		outcome.check.globalSlotCount,
-		outcome.check.deviceClasses,
-		{ debug: true },
-	);
 	const output: string[] = [];
 	const pauses: DebugRunResult['pauses'] = [];
 	const session: DebugSession = new DebugSession({
@@ -48,7 +41,7 @@ async function runWithDebugger(
 			}, 0);
 		},
 	});
-	const run = startRun(compiled, {
+	const run = testHost.run(outcome, {
 		debug: session,
 		onOutput: (level, text) => {
 			if (level === 'stdout') {

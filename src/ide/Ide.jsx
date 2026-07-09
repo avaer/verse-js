@@ -15,14 +15,9 @@ import Console from './Console.jsx';
 import DebugPanel from './DebugPanel.jsx';
 import DocsPanel from './DocsPanel.jsx';
 import { loadFiles, saveFiles, loadUiState, saveUiState, makeLogEntry } from './store.js';
-import {
-	compileVerse,
-	compileProgram,
-	getNativeRegistry,
-	startRun as startVerseRun,
-	VerseRunCancelled,
-	VerseTaskCancelled,
-} from '@/src/verse/pipeline';
+import { VerseRunCancelled, VerseTaskCancelled } from '@/src/verse';
+import { LocalStorageAdapter } from '@/src/verse/adapters';
+import { ideHost } from './verse-host';
 import { DebugSession } from '@/src/verse/debug/DebugSession';
 import { EXAMPLE_FILES } from './examples.js';
 
@@ -88,7 +83,7 @@ export default function Ide() {
 		}
 		const source = files[activeFile];
 		const timeout = setTimeout(() => {
-			const result = compileVerse(source);
+			const result = ideHost.compile(source);
 			setDiagnostics((previous) => ({
 				...previous,
 				[activeFile]: result.diagnostics,
@@ -191,7 +186,7 @@ export default function Ide() {
 
 		appendLog('system', `— ${debugEnabled ? 'Debugging' : 'Running'} ${fileName} —`);
 
-		const result = compileVerse(source, { strict: true });
+		const result = ideHost.compile(source, { strict: true });
 		setDiagnostics((previous) => ({ ...previous, [fileName]: result.diagnostics }));
 		if (!result.ok) {
 			for (const diagnostic of result.diagnostics.filter((d) => d.severity === 'error')) {
@@ -216,28 +211,17 @@ export default function Ide() {
 			},
 		});
 
-		let compiled;
+		let run;
 		try {
-			compiled = compileProgram(
-				result.program,
-				getNativeRegistry(),
-				result.check.globalSlotCount,
-				result.check.deviceClasses,
-				{ debug: debugEnabled },
-			);
+			run = ideHost.run(result, {
+				onOutput: (level, text) => appendLog(level, text),
+				debug: debugEnabled ? session : null,
+				persistence: new LocalStorageAdapter(),
+			});
 		} catch (error) {
 			appendLog('error', `Compile error: ${error.message}`, { file: fileName });
 			return;
 		}
-
-		const run = startVerseRun(compiled, {
-			onOutput: (level, text) => appendLog(level, text),
-			debug: session,
-			persistence: {
-				load: (key) => window.localStorage.getItem(key),
-				store: (key, json) => window.localStorage.setItem(key, json),
-			},
-		});
 
 		sessionRef.current = session;
 		runRef.current = run;

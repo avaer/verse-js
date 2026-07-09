@@ -1,16 +1,13 @@
 // docs.ts
-// Generates the builtin/core-library documentation from the native module
-// registry. Single source of truth: whatever is registered in
-// natives/core.ts shows up automatically in the IDE Docs panel, editor
-// hovers, and completions.
+// Generates browsable documentation from a bindings registry. Single
+// source of truth: whatever modules are registered on a host show up
+// automatically in docs panels, editor hovers, and completions.
 
-import { EffectSet } from '../sema/effects';
-import { typeToString, FuncT } from '../sema/types';
-import { buildNativeRegistry } from './natives/core';
-import { NativeEntry, NativeModuleDef } from './natives/registry';
+import { NativeEntry, NativeModuleDef, NativeRegistry } from './bindings/registry';
+import { EffectSet } from './sema/effects';
+import { typeToString, FuncT } from './sema/types';
 
-const IMPLICITLY_IMPORTED_PATHS = ['/Verse.org/Verse'];
-
+/** Documentation for a single exported symbol of a native module. */
 export interface SymbolDoc {
 	name: string;
 	kind: 'function' | 'class' | 'value' | 'enum';
@@ -21,14 +18,17 @@ export interface SymbolDoc {
 	overloadSignatures: string[];
 }
 
+/** Documentation for one native module. */
 export interface ModuleDoc {
 	path: string;
 	description: string;
+	/** True when the module is imported implicitly (no `using` needed). */
 	implicit: boolean;
 	symbols: SymbolDoc[];
 }
 
-let cachedModules: ModuleDoc[] | null = null;
+/** name -> symbol doc plus origin info, for hover/completion indexes. */
+export type IndexedSymbolDoc = SymbolDoc & { modulePath: string; implicit: boolean };
 
 // Only suspends/decides are surfaced; reads/writes/allocates are the
 // `transacts` default and would be noise on every entry.
@@ -80,7 +80,7 @@ function toSymbolDoc(entry: NativeEntry): SymbolDoc {
 		return {
 			name: entry.name,
 			kind: 'enum',
-			signature: `${entry.name} := enum`,
+			signature: `${entry.name} := enum{${entry.info.values.join(', ')}}`,
 			effects: [],
 			doc: entry.doc,
 			example: '',
@@ -104,20 +104,16 @@ function toModuleDoc(def: NativeModuleDef): ModuleDoc {
 	return {
 		path: def.path,
 		description: def.description,
-		implicit: IMPLICITLY_IMPORTED_PATHS.includes(def.path),
+		implicit: def.implicit,
 		symbols,
 	};
 }
 
 /**
- * Returns [{ path, description, implicit, symbols }] sorted with the
- * prelude first, then alphabetically.
+ * Generates docs for every module in a registry, sorted with implicit
+ * modules (the prelude) first, then alphabetically by path.
  */
-export function generateBuiltinDocs(): ModuleDoc[] {
-	if (cachedModules) {
-		return cachedModules;
-	}
-	const registry = buildNativeRegistry();
+export function generateDocs(registry: NativeRegistry): ModuleDoc[] {
 	const modules = [...registry.modules.values()].map(toModuleDoc);
 	modules.sort((a, b) => {
 		if (a.implicit !== b.implicit) {
@@ -125,14 +121,13 @@ export function generateBuiltinDocs(): ModuleDoc[] {
 		}
 		return a.path.localeCompare(b.path);
 	});
-	cachedModules = modules;
 	return modules;
 }
 
-/** name -> { ...symbolDoc, modulePath, implicit } for hover/completions. */
-export function buildSymbolIndex(): Map<string, SymbolDoc & { modulePath: string; implicit: boolean }> {
-	const index = new Map<string, SymbolDoc & { modulePath: string; implicit: boolean }>();
-	for (const moduleDoc of generateBuiltinDocs()) {
+/** Flattens module docs into a name -> symbol index (first module wins). */
+export function buildSymbolIndex(docs: ModuleDoc[]): Map<string, IndexedSymbolDoc> {
+	const index = new Map<string, IndexedSymbolDoc>();
+	for (const moduleDoc of docs) {
 		for (const symbol of moduleDoc.symbols) {
 			if (!index.has(symbol.name)) {
 				index.set(symbol.name, {
@@ -146,12 +141,13 @@ export function buildSymbolIndex(): Map<string, SymbolDoc & { modulePath: string
 	return index;
 }
 
-export function getModulePaths(): string[] {
-	return generateBuiltinDocs().map((m) => m.path).sort();
+/** Sorted module paths, e.g. for `using { ... }` completions. */
+export function getModulePaths(docs: ModuleDoc[]): string[] {
+	return docs.map((m) => m.path).sort();
 }
 
-/** Markdown rendering shared by Monaco hovers and completion docs. */
-export function symbolDocToMarkdown(symbol: SymbolDoc & { modulePath: string; implicit: boolean }): string {
+/** Markdown rendering shared by editor hovers and completion docs. */
+export function symbolDocToMarkdown(symbol: IndexedSymbolDoc): string {
 	const lines: string[] = [];
 	lines.push('```verse\n' + symbol.signature + '\n```');
 	if (symbol.doc) {

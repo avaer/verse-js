@@ -4,7 +4,7 @@
 // grouped by module; shows signatures, effects, docs, and examples.
 
 import React, { useMemo, useState } from 'react';
-import { generateBuiltinDocs } from '@/src/verse/runtime/docs';
+import { ideHost } from './verse-host';
 
 function EffectBadge({ effect }) {
 	return (
@@ -63,7 +63,7 @@ function SymbolEntry({ symbol }) {
 }
 
 export default function DocsPanel({ onClose }) {
-	const modules = useMemo(() => generateBuiltinDocs(), []);
+	const modules = useMemo(() => ideHost.docs(), []);
 	const [query, setQuery] = useState('');
 
 	const filtered = useMemo(() => {

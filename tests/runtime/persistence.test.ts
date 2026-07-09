@@ -4,7 +4,7 @@
 // validation diagnostics.
 
 import { describe, expect, it } from 'vitest';
-import { compileVerse, runVerse } from '../../src/verse/pipeline';
+import { testHost } from '../helpers/test-host';
 
 function makeAdapter(store: Map<string, string>) {
 	return {
@@ -32,11 +32,11 @@ my_device := class(creative_device):
         Print("score was {Score}")
         if (set PlayerScores[ThePlayer] = Score + 10) {}
 `;
-		const first = await runVerse(source, { persistence: makeAdapter(store) });
+		const first = await testHost.execute(source, { persistence: makeAdapter(store) });
 		expect(first.errors).toEqual([]);
 		expect(first.output).toEqual(['score was 0']);
 
-		const second = await runVerse(source, { persistence: makeAdapter(store) });
+		const second = await testHost.execute(source, { persistence: makeAdapter(store) });
 		expect(second.errors).toEqual([]);
 		expect(second.output).toEqual(['score was 10']);
 	});
@@ -57,16 +57,16 @@ my_device := class(creative_device):
         Print("items: {Items.Length}")
         if (set Inventories[P] = Items + array{"sword"}) {}
 `;
-		await runVerse(source, { persistence: makeAdapter(store) });
-		await runVerse(source, { persistence: makeAdapter(store) });
-		const third = await runVerse(source, { persistence: makeAdapter(store) });
+		await testHost.execute(source, { persistence: makeAdapter(store) });
+		await testHost.execute(source, { persistence: makeAdapter(store) });
+		const third = await testHost.execute(source, { persistence: makeAdapter(store) });
 		expect(third.output).toEqual(['items: 2']);
 	});
 });
 
 describe('persistable validation', () => {
 	it('rejects var fields in persistable classes', () => {
-		const result = compileVerse(`
+		const result = testHost.compile(`
 save_data := class<final><persistable>:
     var Coins : int = 0
 `);
@@ -75,7 +75,7 @@ save_data := class<final><persistable>:
 	});
 
 	it('requires final on persistable classes', () => {
-		const result = compileVerse(`
+		const result = testHost.compile(`
 save_data := class<persistable>:
     Coins : int = 0
 `);
@@ -84,7 +84,7 @@ save_data := class<persistable>:
 	});
 
 	it('accepts a valid persistable class', () => {
-		const result = compileVerse(`
+		const result = testHost.compile(`
 save_data := class<final><persistable>:
     Coins : int = 0
     Name : string = ""

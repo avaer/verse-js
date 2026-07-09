@@ -4,8 +4,10 @@
 // Each case reports total wall time; use these numbers to decide whether a
 // bytecode backend is ever worth it (see the plan's performance section).
 
-import { compileProgram, compileVerse, getNativeRegistry, startRun } from '../src/verse/pipeline';
-import { VirtualClock } from '../src/verse/runtime/scheduler';
+import { createHost, startRun, VirtualClock } from '../src/verse/index';
+import { uefnModules } from '../src/verse/extras/uefn';
+
+const host = createHost({ modules: uefnModules });
 
 interface Bench {
 	name: string;
@@ -100,19 +102,14 @@ bench_device := class(creative_device):
 ];
 
 async function runBench(bench: Bench): Promise<void> {
-	const outcome = compileVerse(bench.source, { strict: true });
+	const outcome = host.compile(bench.source, { strict: true });
 	if (!outcome.ok) {
 		console.error(`  COMPILE FAILED: ${outcome.diagnostics.map((d) => d.message).join('; ')}`);
 		process.exitCode = 1;
 		return;
 	}
-	const compiled = compileProgram(
-		outcome.program,
-		getNativeRegistry(),
-		outcome.check.globalSlotCount,
-		outcome.check.deviceClasses,
-		{ debug: false },
-	);
+	// Closure-compile outside the timed section so runs measure execution.
+	const compiled = host.prepare(outcome);
 	const output: string[] = [];
 	const clock = new VirtualClock();
 	const start = performance.now();

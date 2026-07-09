@@ -243,8 +243,13 @@ export default function Ide() {
 		runRef.current = run;
 		setRunFile(fileName);
 		setDebugSession(debugEnabled);
-		setRunState('running');
-		setPausedInfo(null);
+		// The run starts synchronously inside startVerseRun, so an early
+		// breakpoint may already have paused (and set state) by now; don't
+		// clobber that with 'running'.
+		if (!session.paused) {
+			setRunState('running');
+			setPausedInfo(null);
+		}
 
 		run.done
 			.then(() => {

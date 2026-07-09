@@ -2,6 +2,7 @@
   "name": "verse-js",
   "version": "0.1.0",
   "private": true,
+  "packageManager": "pnpm@11.9.0",
   "description": "A self-contained browser IDE that edits, runs, and debugs a subset of Epic Games' Verse programming language.",
   "scripts": {
     "dev": "next dev",

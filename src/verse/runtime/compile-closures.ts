@@ -1518,6 +1518,19 @@ class Compiler {
 				v === FAIL ? FAIL : verseFloatToString(v as Value));
 		}
 
+		// Method-call fusion: `obj.Method(args)` resolves the method through
+		// a per-site inline cache and invokes it with self = obj directly,
+		// skipping the bound-VFunctionValue allocation a member read pays.
+		const calleeSema = semaOf(expr.callee);
+		if (
+			expr.callee.kind === 'Member' &&
+			callMode !== 'construct' &&
+			(calleeSema.memberMode === undefined || calleeSema.memberMode === 'dynamic') &&
+			expr.args.every((a) => a.name === null)
+		) {
+			return this.compileMethodCall(expr);
+		}
+
 		const callee = this.compileExpr(expr.callee);
 
 		if (callMode === 'construct') {
@@ -1597,6 +1610,76 @@ class Compiler {
 		});
 	}
 
+	/**
+	 * Fused `obj.Method(args)`: evaluate the receiver and arguments, then
+	 * dispatch through a per-site monomorphic inline cache (class identity
+	 * -> resolved method) invoking with self = receiver — no intermediate
+	 * bound function. Field-valued callees, natives, extensions, and
+	 * container pseudo-methods fall back to the generic read + dispatch.
+	 */
+	private compileMethodCall(expr: Call): Code {
+		const member = expr.callee as Extract<Expr, { kind: 'Member' }>;
+		const name = member.name;
+		const failable = expr.failable;
+		const line = expr.span.start.line;
+		const target = this.compileExpr(member.target);
+		const args = this.compileList(expr.args.map((a) => a.value));
+
+		let cacheCls: unknown = null;
+		let cacheMethod: VFunctionValue | null = null;
+
+		const invoke = (t: unknown, argValues: Value[], ctx: Ctx): unknown => {
+			if (t instanceof VObject) {
+				if (t.cls === cacheCls) {
+					const m = cacheMethod as VFunctionValue;
+					return (m.invoke as (self: Value, args: Value[], ctx: Ctx) => unknown)(t, argValues, ctx);
+				}
+				// Fields shadow methods, so only method hits are cacheable.
+				if (!t.fields.has(name)) {
+					const cls = t.cls;
+					if (cls instanceof RuntimeClass) {
+						const method = cls.methods.get(name);
+						if (method) {
+							const resolved = resolveMethod(method, ctx);
+							cacheCls = cls;
+							cacheMethod = resolved;
+							return (resolved.invoke as (self: Value, args: Value[], ctx: Ctx) => unknown)(t, argValues, ctx);
+						}
+					}
+				}
+			}
+			const m = memberValue(t as Value, name, ctx);
+			if (m === FAIL) {
+				return FAIL;
+			}
+			return dispatchCall(m as Value, argValues, undefined, ctx, failable, line);
+		};
+
+		return (env, ctx) => {
+			const t = target(env, ctx);
+			if (isPromise(t)) {
+				return t.then((tv) => {
+					if (tv === FAIL) {
+						return FAIL;
+					}
+					return chain(args(env, ctx), (a) =>
+						a === FAIL ? FAIL : invoke(tv, a as Value[], ctx));
+				});
+			}
+			if (t === FAIL) {
+				return FAIL;
+			}
+			const a = args(env, ctx);
+			if (isPromise(a)) {
+				return a.then((av) => (av === FAIL ? FAIL : invoke(t, av as Value[], ctx)));
+			}
+			if (a === FAIL) {
+				return FAIL;
+			}
+			return invoke(t, a as Value[], ctx);
+		};
+	}
+
 	private compileSuperCall(expr: Call): Code {
 		const memberName = (expr.callee as Extract<Expr, { kind: 'Member' }>).name;
 		const currentClass = this.fnCtx.currentClass;
@@ -1661,15 +1744,49 @@ class Compiler {
 		}
 
 		const target = this.compileExpr(expr.target);
+		// Per-site monomorphic inline cache keyed on class identity.
+		// Classes are immutable after compile, so no invalidation is needed;
+		// a different class at the same site just re-resolves (miss path).
+		let cacheCls: unknown = null;
+		let cacheIsField = true;
+		let cacheMethod: VFunctionValue | null = null;
+		const read = (t: unknown, ctx: Ctx): unknown => {
+			if (t instanceof VObject) {
+				if (t.cls === cacheCls) {
+					return cacheIsField
+						? t.fields.get(name)
+						: (cacheMethod as VFunctionValue).bind(t);
+				}
+				if (t.fields.has(name)) {
+					cacheCls = t.cls;
+					cacheIsField = true;
+					cacheMethod = null;
+					return t.fields.get(name);
+				}
+				const cls = t.cls;
+				if (cls instanceof RuntimeClass) {
+					const method = cls.methods.get(name);
+					if (method) {
+						const resolved = resolveMethod(method, ctx);
+						cacheCls = cls;
+						cacheIsField = false;
+						cacheMethod = resolved;
+						return resolved.bind(t);
+					}
+				}
+			}
+			// Arrays/strings/maps, natives, extensions: generic path.
+			return memberValue(t as Value, name, ctx);
+		};
 		return (env, ctx) => {
 			const t = target(env, ctx);
 			if (isPromise(t)) {
-				return t.then((tv) => (tv === FAIL ? FAIL : memberValue(tv as Value, name, ctx)));
+				return t.then((tv) => (tv === FAIL ? FAIL : read(tv, ctx)));
 			}
 			if (t === FAIL) {
 				return FAIL;
 			}
-			return memberValue(t as Value, name, ctx);
+			return read(t, ctx);
 		};
 	}
 

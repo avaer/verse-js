@@ -69,6 +69,31 @@ Print("{Hits - 1}")
 `,
 	},
 	{
+		// Method dispatch + field reads through a small hierarchy; the
+		// measurement instrument for inline caches / method-call fusion.
+		name: 'OO dispatch (200k method calls + field reads)',
+		expect: /^9200000$/,
+		source: `
+shape := class:
+    Scale : int = 1
+    Area() : int = 0
+square := class(shape):
+    Side : int = 2
+    Area<override>() : int = Side * Side * Scale
+circle := class(shape):
+    R : int = 3
+    Area<override>() : int = 3 * R * R * Scale
+Total() : int =
+    S := square{Side := 4}
+    C := circle{R := 5}
+    var Acc : int = 0
+    for (I := 1..100000):
+        set Acc += S.Area() + C.Area() + S.Scale
+    Acc
+Print("{Total()}")
+`,
+	},
+	{
 		name: 'failure contexts (100k speculative rollbacks)',
 		expect: /^50000$/,
 		source: `

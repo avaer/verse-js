@@ -209,6 +209,17 @@ function buildPrelude(): ModuleBuilder {
 		},
 		'Remainder of X / Y; fails when Y = 0.', 'if (R := Mod[7, 3]) { Print("{R}") }');
 
+	m.fn('Quotient', { params: [['X', T.int], ['Y', T.int]], ret: T.int, effects: { decides: true } },
+		(args) => {
+			const y = num(args[1]);
+			if (y === 0) {
+				return FAIL;
+			}
+			return Math.trunc(num(args[0]) / y);
+		},
+		'Integer division of X by Y, truncated toward zero; fails when Y = 0.',
+		'if (Q := Quotient[7, 2]) { Print("{Q}") }');
+
 	m.fn('Concatenate', { params: [['Left', T.array(T.any)], ['Right', T.array(T.any)]], ret: T.array(T.any) },
 		(args) => {
 			const a = args[0];

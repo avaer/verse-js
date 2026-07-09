@@ -390,7 +390,11 @@ class Parser {
 
 		if (
 			this.at('ident') && RESERVED_FUTURE_KEYWORDS.has(this.peek().text) &&
-			this.peek(1).kind === 'op' && (this.peek(1).text === ':=' || this.peek(1).text === ':')
+			this.peek(1).kind === 'op' &&
+			// `name :=`, `name :`, `name(` (function definition), `name<spec>`
+			(this.peek(1).text === ':=' || this.peek(1).text === ':' ||
+				(this.peek(1).text === '(' && !this.peek(1).spaceBefore) ||
+				(this.peek(1).text === '<' && !this.peek(1).spaceBefore))
 		) {
 			throw this.error(
 				`'${this.peek().text}' is reserved for future use and cannot be used as a name`,
@@ -804,10 +808,13 @@ class Parser {
 
 	// --- bodies ---
 
-	/** After `=`: an indented block, or inline statement(s). */
+	/** After `=`: an indented block, a braced block, or inline statement(s). */
 	private parseBodyAfterEquals(): Expr {
 		if (this.at('newline')) {
 			return this.parseIndentedBlock();
+		}
+		if (this.at('op', '{')) {
+			return this.parseBracedBlock();
 		}
 		return this.parseInlineBody();
 	}
@@ -1491,12 +1498,23 @@ class Parser {
 	private parseParenthesized(): Expr {
 		const open = this.next(); // (
 
-		// `(super:)` prefix for super-dispatch.
+		// `(super:)` prefix for super-dispatch: `(super:)Method(...)`.
 		if (this.atIdent('super') && this.peek(1).kind === 'op' && this.peek(1).text === ':') {
 			this.next();
 			this.next();
 			this.expect('op', ')', "')' after '(super:'");
-			return { kind: 'Ident', name: 'super', span: this.spanFrom(open) };
+			const superIdent: Expr = { kind: 'Ident', name: 'super', span: this.spanFrom(open) };
+			// The method name follows directly (no dot) in Verse syntax.
+			if (this.at('ident') && !isKeyword(this.peek().text)) {
+				const nameTok = this.next();
+				return {
+					kind: 'Member',
+					target: superIdent,
+					name: nameTok.text,
+					span: this.spanFrom(open),
+				};
+			}
+			return superIdent;
 		}
 
 		if (this.at('op', ')')) {

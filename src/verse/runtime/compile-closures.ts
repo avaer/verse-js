@@ -267,7 +267,9 @@ class Compiler {
 					value = this.loadPersistentMap(ctx, init.name, value as Value);
 				}
 				if (init.slot >= 0) {
-					globals[init.slot] = value as Value;
+					// Structs have value semantics: copy on assignment so a
+					// global initialized from another global doesn't alias it.
+					globals[init.slot] = copyIfStruct(value as Value);
 				}
 			}
 
@@ -1206,6 +1208,18 @@ class Compiler {
 		const right = this.compileExpr(expr.right);
 		const op = expr.op;
 		const line = expr.span.start.line;
+		// JS numbers can't distinguish 5.0 from 5, so int-vs-float division
+		// must be decided statically: float / float is plain IEEE division,
+		// not the failable int/int -> rational form.
+		if (op === '/' && (semaOf(expr.left).type?.k === 'float' || semaOf(expr.right).type?.k === 'float')) {
+			return (env, ctx) => chain(left(env, ctx), (l) => {
+				if (l === FAIL) {
+					return FAIL;
+				}
+				return chain(right(env, ctx), (r) =>
+					r === FAIL ? FAIL : (l as number) / (r as number));
+			});
+		}
 		return (env, ctx) => chain(left(env, ctx), (l) => {
 			if (l === FAIL) {
 				return FAIL;

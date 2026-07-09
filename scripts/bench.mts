@@ -102,14 +102,18 @@ bench_device := class(creative_device):
 ];
 
 async function runBench(bench: Bench): Promise<void> {
+	// Front end + checker, timed separately from execution.
+	const compileStart = performance.now();
 	const outcome = host.compile(bench.source, { strict: true });
 	if (!outcome.ok) {
 		console.error(`  COMPILE FAILED: ${outcome.diagnostics.map((d) => d.message).join('; ')}`);
 		process.exitCode = 1;
 		return;
 	}
-	// Closure-compile outside the timed section so runs measure execution.
+	// Closure compilation is part of the compile cost embedders pay.
 	const compiled = host.prepare(outcome);
+	const compileMs = performance.now() - compileStart;
+
 	const output: string[] = [];
 	const clock = new VirtualClock();
 	const start = performance.now();
@@ -131,7 +135,11 @@ async function runBench(bench: Bench): Promise<void> {
 	if (!ok) {
 		process.exitCode = 1;
 	}
-	console.log(`${ok ? 'ok  ' : 'FAIL'} ${bench.name.padEnd(45)} ${elapsed.toFixed(1).padStart(9)} ms   (${last})`);
+	console.log(
+		`${ok ? 'ok  ' : 'FAIL'} ${bench.name.padEnd(45)}` +
+		` compile ${compileMs.toFixed(1).padStart(7)} ms` +
+		`   run ${elapsed.toFixed(1).padStart(9)} ms   (${last})`,
+	);
 }
 
 console.log('verse-js benchmarks (closure compiler, virtual clock)\n');

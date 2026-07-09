@@ -1,12 +1,41 @@
 {
   "name": "verse-js",
   "version": "0.1.0",
-  "private": true,
   "packageManager": "pnpm@11.9.0",
-  "description": "A self-contained browser IDE that edits, runs, and debugs a subset of Epic Games' Verse programming language.",
+  "description": "An embeddable runtime and browser IDE for a subset of Epic Games' Verse programming language.",
+  "license": "MIT",
+  "type": "module",
+  "files": [
+    "dist"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./analysis": {
+      "types": "./dist/analysis.d.ts",
+      "default": "./dist/analysis.js"
+    },
+    "./extras/uefn": {
+      "types": "./dist/extras/uefn.d.ts",
+      "default": "./dist/extras/uefn.js"
+    },
+    "./adapters": {
+      "types": "./dist/adapters/index.d.ts",
+      "default": "./dist/adapters/index.js"
+    },
+    "./adapters/node": {
+      "types": "./dist/adapters/node.d.ts",
+      "default": "./dist/adapters/node.js"
+    }
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "build:lib": "tsup",
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run",
@@ -32,6 +61,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.2.6",
     "tailwindcss": "^4",
+    "tsup": "^8.5.1",
     "tsx": "^4.23.0",
     "typescript": "^5",
     "vitest": "^3.0.0"

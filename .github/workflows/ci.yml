@@ -30,6 +30,9 @@ jobs:
       - name: Build
         run: pnpm build
 
+      - name: Library build
+        run: pnpm build:lib
+
       - name: Install Playwright browsers
         run: pnpm exec playwright install --with-deps chromium
 

@@ -8,6 +8,9 @@
 # production
 /build
 
+# library build
+/dist/
+
 # misc
 .DS_Store
 *.pem

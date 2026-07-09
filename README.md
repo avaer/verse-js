@@ -173,9 +173,10 @@ The app is fully static (no server components, no API routes), so it
 exports cleanly. `GITHUB_PAGES=true pnpm build` produces a static export
 in `out/` with the base path `/verse-js` and directory-style URLs;
 `.github/workflows/deploy-pages.yml` builds it on every push to `master`
-and force-pushes the result to the `gh-pages` branch, which GitHub
-serves automatically (no repo-settings step needed). To smoke-test the
-export locally under the base path:
+and force-pushes the result to the `gh-pages` branch. Enable Pages once
+(Settings → Pages → Source "Deploy from a branch" → `gh-pages`, `/`) and
+the site stays current at <https://avaer.github.io/verse-js/>. To
+smoke-test the export locally under the base path:
 
 ```bash
 GITHUB_PAGES=true pnpm build

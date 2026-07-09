@@ -1,10 +1,11 @@
 name: Deploy to GitHub Pages
 
-# Publishes the static export to the gh-pages branch. Branch-based Pages
-# needs no repo-settings step: GitHub auto-enables Pages when a gh-pages
-# branch exists (and the workflow token only needs contents: write —
-# unlike the "GitHub Actions" Pages source, whose site-creation API is
-# not accessible to workflow tokens).
+# Publishes the static export to the gh-pages branch on every push to
+# master. To go live, enable Pages once in the repo settings: Settings >
+# Pages > Source "Deploy from a branch" > gh-pages / (root). The workflow
+# token only needs contents: write; the "GitHub Actions" Pages source is
+# not used because its site-creation API is not accessible to workflow
+# tokens ("Resource not accessible by integration").
 
 on:
   push:

@@ -34,6 +34,25 @@ Print(Describe(C))
 		expect(r.output).toEqual(['woof', 'meow', 'woof', 'meow']);
 	});
 
+	it('three classes rotating through one site overflow the 2-way cache', async () => {
+		const r = await run(`
+animal := class:
+    Speak() : string = "..."
+dog := class(animal):
+    Speak<override>() : string = "woof"
+cat := class(animal):
+    Speak<override>() : string = "meow"
+cow := class(animal):
+    Speak<override>() : string = "moo"
+Describe(A : animal) : string = A.Speak()
+Pets : []animal = array{dog{}, cat{}, cow{}, dog{}, cat{}, cow{}}
+for (P : Pets):
+    Print(Describe(P))
+`);
+		expect(r.errors).toEqual([]);
+		expect(r.output).toEqual(['woof', 'meow', 'moo', 'woof', 'meow', 'moo']);
+	});
+
 	it('inherited (non-overridden) methods dispatch correctly', async () => {
 		const r = await run(`
 base := class:

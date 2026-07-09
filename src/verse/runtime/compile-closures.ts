@@ -1789,13 +1789,22 @@ class Compiler {
 		const target = this.compileExpr(member.target);
 		const args = this.compileList(expr.args.map((a) => a.value));
 
-		let cacheCls: unknown = null;
-		let cacheMethod: VFunctionValue | null = null;
+		// Two-way polymorphic cache: sites alternating between two classes
+		// (mixed-shape loops) hit the second entry instead of re-resolving
+		// on every call. A miss shifts entry 1 down and installs at entry 0.
+		let cacheCls1: unknown = null;
+		let cacheMethod1: VFunctionValue | null = null;
+		let cacheCls2: unknown = null;
+		let cacheMethod2: VFunctionValue | null = null;
 
 		const invoke = (t: unknown, argValues: Value[], ctx: Ctx): unknown => {
 			if (t instanceof VObject) {
-				if (t.cls === cacheCls) {
-					const m = cacheMethod as VFunctionValue;
+				if (t.cls === cacheCls1) {
+					const m = cacheMethod1 as VFunctionValue;
+					return (m.invoke as (self: Value, args: Value[], ctx: Ctx) => unknown)(t, argValues, ctx);
+				}
+				if (t.cls === cacheCls2) {
+					const m = cacheMethod2 as VFunctionValue;
 					return (m.invoke as (self: Value, args: Value[], ctx: Ctx) => unknown)(t, argValues, ctx);
 				}
 				// Fields shadow methods, so only method hits are cacheable.
@@ -1805,8 +1814,10 @@ class Compiler {
 						const method = cls.methods.get(name);
 						if (method) {
 							const resolved = resolveMethod(method, ctx);
-							cacheCls = cls;
-							cacheMethod = resolved;
+							cacheCls2 = cacheCls1;
+							cacheMethod2 = cacheMethod1;
+							cacheCls1 = cls;
+							cacheMethod1 = resolved;
 							return (resolved.invoke as (self: Value, args: Value[], ctx: Ctx) => unknown)(t, argValues, ctx);
 						}
 					}
@@ -1908,23 +1919,34 @@ class Compiler {
 		}
 
 		const target = this.compileExpr(expr.target);
-		// Per-site monomorphic inline cache keyed on class identity.
+		// Per-site two-way polymorphic inline cache keyed on class identity.
 		// Classes are immutable after compile, so no invalidation is needed;
-		// a different class at the same site just re-resolves (miss path).
-		let cacheCls: unknown = null;
-		let cacheIsField = true;
-		let cacheMethod: VFunctionValue | null = null;
+		// a miss shifts entry 1 down and re-resolves into entry 0.
+		let cacheCls1: unknown = null;
+		let cacheIsField1 = true;
+		let cacheMethod1: VFunctionValue | null = null;
+		let cacheCls2: unknown = null;
+		let cacheIsField2 = true;
+		let cacheMethod2: VFunctionValue | null = null;
 		const read = (t: unknown, ctx: Ctx): unknown => {
 			if (t instanceof VObject) {
-				if (t.cls === cacheCls) {
-					return cacheIsField
+				if (t.cls === cacheCls1) {
+					return cacheIsField1
 						? t.fields.get(name)
-						: (cacheMethod as VFunctionValue).bind(t);
+						: (cacheMethod1 as VFunctionValue).bind(t);
+				}
+				if (t.cls === cacheCls2) {
+					return cacheIsField2
+						? t.fields.get(name)
+						: (cacheMethod2 as VFunctionValue).bind(t);
 				}
 				if (t.fields.has(name)) {
-					cacheCls = t.cls;
-					cacheIsField = true;
-					cacheMethod = null;
+					cacheCls2 = cacheCls1;
+					cacheIsField2 = cacheIsField1;
+					cacheMethod2 = cacheMethod1;
+					cacheCls1 = t.cls;
+					cacheIsField1 = true;
+					cacheMethod1 = null;
 					return t.fields.get(name);
 				}
 				const cls = t.cls;
@@ -1932,9 +1954,12 @@ class Compiler {
 					const method = cls.methods.get(name);
 					if (method) {
 						const resolved = resolveMethod(method, ctx);
-						cacheCls = cls;
-						cacheIsField = false;
-						cacheMethod = resolved;
+						cacheCls2 = cacheCls1;
+						cacheIsField2 = cacheIsField1;
+						cacheMethod2 = cacheMethod1;
+						cacheCls1 = cls;
+						cacheIsField1 = false;
+						cacheMethod1 = resolved;
 						return resolved.bind(t);
 					}
 				}

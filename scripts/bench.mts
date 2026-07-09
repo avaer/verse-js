@@ -94,6 +94,30 @@ Print("{Total()}")
 `,
 	},
 	{
+		// A single call site alternating between two classes; exercises the
+		// two-way polymorphic inline cache (a monomorphic cache thrashes).
+		name: 'polymorphic dispatch (200k calls, mixed site)',
+		expect: /^4900000$/,
+		source: `
+shape := class:
+    Area() : int = 0
+square := class(shape):
+    Side : int = 2
+    Area<override>() : int = Side * Side
+circle := class(shape):
+    R : int = 3
+    Area<override>() : int = 3 * R * R
+Total() : int =
+    Shapes : []shape = array{square{Side := 4}, circle{R := 5}, square{Side := 2}, circle{R := 1}}
+    var Acc : int = 0
+    for (I := 1..50000):
+        for (S : Shapes):
+            set Acc += S.Area()
+    Acc
+Print("{Total()}")
+`,
+	},
+	{
 		name: 'failure contexts (100k speculative rollbacks)',
 		expect: /^50000$/,
 		source: `

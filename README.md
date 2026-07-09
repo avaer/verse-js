@@ -1,25 +1,117 @@
 # verse-js
 
-A self-contained browser IDE that edits, **runs, and debugs**
+An **embeddable JavaScript/TypeScript runtime** for
 [Verse](https://dev.epicgames.com/documentation/en-us/uefn/verse-language-reference),
-Epic Games' programming language for UEFN/Fortnite — no backend, no UEFN
-install, everything happens in the browser tab. It ships a full
-implementation of the core language: a hand-written lexer and parser, a
-type/effect checker, a closure-compiling runtime with transactional failure
-semantics, structured concurrency, and a source-level debugger.
+Epic Games' programming language for UEFN/Fortnite — plus a self-contained
+**browser IDE** that edits, runs, and debugs Verse with no backend and no
+UEFN install. It ships a full implementation of the core language: a
+hand-written lexer and parser, a type/effect checker, a closure-compiling
+runtime with transactional failure semantics, structured concurrency, and a
+source-level debugger.
 
 ![Verse IDE](https://img.shields.io/badge/verse-ide-3fa7ff) ![Next.js 16](https://img.shields.io/badge/next.js-16-black) ![React 19](https://img.shields.io/badge/react-19-61dafb)
 
-## Features
+The project is two things:
 
-- **Monaco editor** with the official Verse TextMate grammar (full syntax
-  highlighting via `vscode-textmate` + `vscode-oniguruma`), live diagnostics
-  as squiggles (error-recovering parser + type/effect checker), hover docs,
-  and completions for every builtin
+1. **A library** (`verse-js`) you can embed in your own app or engine: an
+   isolated *host* with a public *bindings API* for exposing your own native
+   modules to Verse code, pluggable storage adapters, and IDE-grade language
+   services (diagnostics, hover, go-to-definition, completions).
+2. **An IDE** (this repo's Next.js app) built entirely on that public API —
+   the Fortnite/UEFN shims it uses are an optional *extra*, not part of the
+   core runtime.
+
+## Embedding quickstart
+
+```ts
+import { createHost } from 'verse-js';
+import { uefnModules } from 'verse-js/extras/uefn';   // optional UEFN shims
+import { MemoryStorageAdapter } from 'verse-js/adapters';
+
+const host = createHost({
+  modules: uefnModules,                     // optional extras (three.js-style)
+  persistence: new MemoryStorageAdapter(),  // storage for weak_map persistence
+});
+
+// One-shot: compile (strict) + run to completion.
+const { output, errors, diagnostics } = await host.execute(`
+  Print("Hello from Verse")
+`);
+
+// Or stage it: compile once, inspect diagnostics, run with options.
+const outcome = host.compile(source);
+if (outcome.ok) {
+  const run = host.run(outcome, {
+    onOutput: (level, text) => console.log(level, text),
+  });
+  await run.done;      // run.stop() cancels all tasks
+}
+
+// IDE services, generated from this host's registry:
+const docs = host.docs();               // browsable module documentation
+const analysis = host.analyze(source);  // hoverAt / definitionAt / completionsAt
+```
+
+Hosts are isolated: each `createHost` call gets its own bindings registry,
+so two hosts never share modules or state.
+
+### Defining your own native modules (the bindings API)
+
+Everything the runtime exposes to Verse code goes through `defineModule` —
+including the bundled standard library and the UEFN extras, so the API
+surface you use is the one the project itself is built on:
+
+```ts
+import { createHost, defineModule, declareNativeClass, T, FAIL } from 'verse-js';
+
+const weather = defineModule('/MyGame.com/Weather', 'Weather control.', (m) => {
+  m.fn('SetRain', { params: [['Intensity', T.float]], ret: T.void },
+    ([intensity]) => { engine.setRain(intensity as number); return undefined; },
+    'Sets the rain intensity from 0.0 to 1.0.');
+
+  // <decides> (failable) functions return FAIL to fail the surrounding context.
+  m.fn('GetZone', { params: [['Name', T.string]], ret: T.int, effects: { decides: true } },
+    ([name]) => engine.findZone(name as string) ?? FAIL,
+    'Looks up a zone by name; fails when it does not exist.');
+
+  m.value('MaxIntensity', T.float, 1.0, 'Maximum rain intensity.');
+});
+
+const host = createHost({ modules: [weather] });
+await host.execute(`
+  using { /MyGame.com/Weather }
+  SetRain(0.5)
+`);
+```
+
+Modules can also contribute **native classes** (with runtime method
+dispatch), **enums**, **entry-point protocols** (e.g. "classes extending
+`creative_device` run `OnBegin`"), implicit (prelude) imports, and
+tolerated namespace roots. See
+[ARCHITECTURE.md](ARCHITECTURE.md#the-bindings-model) for the full model
+and `tests/embedding/host.test.ts` for working examples of each.
+
+### Package entry points
+
+| Entry | Contents |
+| --- | --- |
+| `verse-js` | `createHost`, the bindings API, stdlib, docs generation, language services |
+| `verse-js/extras/uefn` | Optional `/Fortnite.com/Devices` + `/UnrealEngine.com/...Diagnostics` shims |
+| `verse-js/adapters` | `MemoryStorageAdapter`, `LocalStorageAdapter` |
+| `verse-js/adapters/node` | `JsonFileStorageAdapter` (Node `fs`; kept out of browser bundles) |
+| `verse-js/analysis` | Position-based IDE queries (`hoverAt`, `definitionAt`, `completionsAt`) |
+
+`pnpm build:lib` produces the publishable ESM build with `.d.ts` in `dist/`.
+
+## The IDE
+
+- **Monaco editor** with the official Verse TextMate grammar, live
+  diagnostics as squiggles (error-recovering parser + type/effect checker),
+  checker-backed hover/go-to-definition, and scope-aware completions
 - **Run button** (F5): lex → parse → check → compile to JS closures →
   execute, with output streaming into the console panel. Straight-line code
-  runs synchronously (no per-statement awaits); execution only goes async at
-  real suspension points (`Sleep`, `Await`, concurrency blocks)
+  runs synchronously; execution only goes async at real suspension points
+  (`Sleep`, `Await`, concurrency blocks)
 - **Debugger**: click the gutter to set breakpoints, then Debug to pause with
   a variables panel, call stack, and live task list; Step Over / Step Into /
   Step Out / Continue; Stop cancels any run, including mid-`Sleep` and
@@ -36,9 +128,9 @@ semantics, structured concurrency, and a source-level debugger.
   options (`?t`, `option{}`, postfix `?`), unions, aliases, `unique` /
   `castable` classes with `X[e]` casts, extension methods, overloading
 - **Persistence**: module-scoped `var X : weak_map(player, t)` survives runs
-  via localStorage, with `<persistable>` validation
+  via the localStorage adapter, with `<persistable>` validation
 - **Browsable builtin docs**: the docs panel, hovers, and completions are all
-  generated from the native module registry, so they never go stale
+  generated from the host's bindings registry, so they never go stale
 - Multi-file workspace (create/rename/delete `.verse` files) persisted to
   localStorage, resizable panes, streaming console with timestamps and
   click-to-jump error locations
@@ -47,10 +139,12 @@ semantics, structured concurrency, and a source-level debugger.
 
 ```bash
 pnpm install
-pnpm dev        # http://localhost:3000
-pnpm test       # vitest suite (lexer/parser/checker/runtime/concurrency/debug)
+pnpm dev        # landing page at http://localhost:3000, IDE at /editor
+pnpm test       # vitest suite (frontend/sema/runtime/conformance/embedding)
+pnpm build:lib  # library build (ESM + .d.ts) to dist/
 pnpm bench      # micro-benchmarks for the closure-compiled runtime
-pnpm build      # production build
+pnpm build      # IDE production build
+pnpm test:e2e   # Playwright end-to-end tests against the IDE
 ```
 
 The editor seeds these example files:
@@ -81,18 +175,24 @@ and effect set are taken from `ReservedSymbols.inl` / `Effects.h` on the
   inference, and call-site legality checks (e.g. no `suspends` calls inside a
   failure context)
 - **Documented deviations**: `int` is a JS number (loses precision past
-  2^53); integral floats print without a trailing `.0`
+  2^53)
 - **Parsed but rejected** (same as shipping Verse): reserved-future syntax
   such as `await`, `upon`, `generator`, `dictate`
 
-Explicit non-goals: Fortnite/UEFN device and player APIs
-(`/Fortnite.com/...` is a tiny shim: `creative_device`, `player`,
-`GetLocalPlayer`), client prediction, distributed transactions.
+Namespace rule for the core/extras split: everything under `/Verse.org/*`
+is core and always registered; `/Fortnite.com/*` and `/UnrealEngine.com/*`
+live in `verse-js/extras/uefn`. Explicit non-goals: full Fortnite/UEFN
+device and player APIs (the extra is a tiny shim: `creative_device`,
+`player`, `GetLocalPlayer`), client prediction, distributed transactions.
 
 ## Architecture
 
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full tour (pipeline stages,
+value/transaction model, concurrency, the bindings/digest model, the
+persistence flow, and every extension point). The short version:
+
 ```
-src/verse/            language core (framework-free, runs in Node + browser)
+src/verse/            the embeddable library (framework-free, Node + browser)
   frontend/           lexer.ts, parser.ts (recursive descent, error
                       recovery), ast.ts, printer.ts
   sema/               checker.ts, types.ts (lattice + subtyping),
@@ -100,18 +200,23 @@ src/verse/            language core (framework-free, runs in Node + browser)
   runtime/            compile-closures.ts (AST -> JS closure tree with a
                       synchronous fast path), values.ts, failure.ts
                       (transaction journal), scheduler.ts (tasks, events,
-                      virtual/real clocks), natives/ (module registry +
-                      the /Verse.org core library with docs metadata)
+                      virtual/real clocks)
+  bindings/           the public bindings API: defineModule, ModuleBuilder,
+                      declareNativeClass, NativeRegistry
+  stdlib/             /Verse.org/* core modules, built via the bindings API
+  extras/uefn.ts      optional /Fortnite.com + /UnrealEngine.com shims
+  adapters/           storage adapters (memory, localStorage; node.ts: fs)
+  host.ts             createHost / VerseHost: compile, run, execute, docs,
+                      analyze
+  analysis.ts         position-based IDE queries over checker results
+  docs.ts             documentation generation from a registry
   debug/              DebugSession.ts (breakpoints, stepping, variable +
                       task snapshots; hooks compiled in only for Debug runs)
-  pipeline.ts         one entry point: compileVerse / startRun / runVerse
 src/monaco/           Monaco loader config, TextMate registration,
-                      intellisense (hover/completions from the registry)
+                      intellisense providers backed by the IDE host
 src/ide/              React components: Ide shell, EditorPane, Console,
                       DebugPanel, DocsPanel, FileSidebar, EditorTabs, Toolbar
 app/                  Next.js app router entry (IDE is client-only)
-scripts/bench.mts     fib / array churn / map churn / rollback /
-                      concurrency micro-benchmarks (pnpm bench)
 ```
 
 Run mode compiles without debug hooks, so plain execution pays nothing for

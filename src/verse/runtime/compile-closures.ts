@@ -1485,8 +1485,13 @@ class Compiler {
 					if (!(self instanceof VObject)) {
 						throw new VerseRuntimeError(`'${name}' requires 'Self'`);
 					}
-					if (!isMethod && self.fields.has(name)) {
-						return self.fields.get(name);
+					if (!isMethod) {
+						// Single lookup: a defined value answers directly; the
+						// has() check only runs for stored `undefined` (void).
+						const v = self.fields.get(name);
+						if (v !== undefined || self.fields.has(name)) {
+							return v;
+						}
 					}
 					return objectMember(self, name, ctx);
 				};
@@ -3225,8 +3230,11 @@ function resolveMethod(method: VFunctionValue, ctx: Ctx): VFunctionValue {
 }
 
 function objectMember(obj: VObject, name: string, ctx: Ctx): Value {
-	if (obj.fields.has(name)) {
-		return obj.fields.get(name);
+	// Single lookup: a defined value answers directly; the has() check only
+	// runs for a missing field or a stored `undefined` (void).
+	const field = obj.fields.get(name);
+	if (field !== undefined || obj.fields.has(name)) {
+		return field;
 	}
 	const cls = obj.cls as RuntimeClass;
 	if (cls instanceof RuntimeClass) {

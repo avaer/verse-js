@@ -36,6 +36,7 @@ export default function Toolbar({
 	onStepOut,
 	docsOpen,
 	onToggleDocs,
+	onResetWorkspace,
 }) {
 	const idle = runState === 'idle';
 	const paused = runState === 'paused';
@@ -118,6 +119,25 @@ export default function Toolbar({
 				{runState === 'running' && (debugSession ? 'Debugging…' : 'Running…')}
 				{runState === 'paused' && 'Paused on breakpoint'}
 			</span>
+
+			<button
+				title="Reset workspace to the bundled example files (discards edits)"
+				onClick={onResetWorkspace}
+				disabled={runState !== 'idle'}
+				className={`flex items-center gap-1.5 rounded px-2.5 py-1 text-xs transition-colors
+					${runState !== 'idle' ? 'cursor-default text-[#5a5a5a]' : 'text-[#cccccc] hover:bg-[#2a2d2e]'}`}
+			>
+				<svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden>
+					<path
+						d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 1.5v3h-3"
+						stroke="currentColor"
+						strokeWidth="1.6"
+						strokeLinecap="round"
+						strokeLinejoin="round"
+					/>
+				</svg>
+				Reset
+			</button>
 
 			<button
 				title="Builtin library reference"

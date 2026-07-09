@@ -402,6 +402,7 @@ export default function Ide() {
 				onStepOut={stepOut}
 				docsOpen={docsOpen}
 				onToggleDocs={() => setDocsOpen((value) => !value)}
+				onResetWorkspace={resetWorkspace}
 			/>
 
 			<div className="flex min-h-0 flex-1 overflow-hidden">

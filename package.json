@@ -41,7 +41,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
-    "bench": "tsx scripts/bench.mts"
+    "bench": "node scripts/bench-run.mjs"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",
@@ -58,6 +58,7 @@
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "esbuild": "^0.28.1",
     "eslint": "^9",
     "eslint-config-next": "16.2.6",
     "tailwindcss": "^4",

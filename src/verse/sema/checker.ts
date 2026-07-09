@@ -47,6 +47,14 @@ export interface SemaData {
 	scope?: Scope;
 	/** Resolved member info for dynamic member access (for IDE tooling). */
 	memberInfo?: MemberInfo;
+	/**
+	 * False when the checker proved this node's failure context cannot write
+	 * journaled state, so the compiler can skip the transaction entirely.
+	 * Absent/true means "assume it writes".
+	 */
+	contextWrites?: boolean;
+	/** Per-clause `contextWrites` for an IfExpr's condition lists. */
+	clauseWrites?: boolean[];
 }
 
 export function semaOf(node: Expr): SemaData {
@@ -1184,8 +1192,10 @@ class Checker {
 					return expected?.k === 'option' ? expected : T.option(T.unknown);
 				}
 				// option{e} is a failure context: e may fail.
-				const innerType = this.inFailureContext(() =>
-					this.checkExpr(expr.value as Expr, expected?.k === 'option' ? expected.inner : undefined));
+				const { result: innerType, writes } = this.observeWrites(() =>
+					this.inFailureContext(() =>
+						this.checkExpr(expr.value as Expr, expected?.k === 'option' ? expected.inner : undefined)));
+				semaOf(expr).contextWrites = writes;
 				return T.option(innerType);
 			}
 			case 'RangeExpr': {
@@ -1216,13 +1226,17 @@ class Checker {
 			}
 			case 'OrExpr': {
 				// Left side runs speculatively; both sides must produce a value.
-				const left = this.inFailureContext(() => this.checkExpr(expr.left));
+				const { result: left, writes } = this.observeWrites(() =>
+					this.inFailureContext(() => this.checkExpr(expr.left)));
+				semaOf(expr).contextWrites = writes;
 				const right = this.checkExpr(expr.right);
 				return joinTypes(left, right);
 			}
 			case 'NotExpr': {
 				this.requireFailureContext(expr.span);
-				this.inFailureContext(() => this.checkExpr(expr.operand));
+				const { writes } = this.observeWrites(() =>
+					this.inFailureContext(() => this.checkExpr(expr.operand)));
+				semaOf(expr).contextWrites = writes;
 				return T.void;
 			}
 			case 'QueryExpr': {
@@ -1310,7 +1324,9 @@ class Checker {
 				if (fn) {
 					fn.loopDepth += 1;
 				}
-				this.inFailureContext(() => this.checkExpr(expr.condition));
+				const { writes } = this.observeWrites(() =>
+					this.inFailureContext(() => this.checkExpr(expr.condition)));
+				semaOf(expr).contextWrites = writes;
 				this.checkExpr(expr.body);
 				if (fn) {
 					fn.loopDepth -= 1;
@@ -2167,19 +2183,22 @@ class Checker {
 
 	private checkIf(expr: IfExpr, expected?: VType): VType {
 		let result: VType | null = null;
+		const clauseWrites: boolean[] = [];
 		for (const clause of expr.clauses) {
 			const clauseScope = new Scope(this.scope, 'block');
 			const previous = this.scope;
 			this.scope = clauseScope;
-			this.inFailureContext(() => {
+			const { writes } = this.observeWrites(() => this.inFailureContext(() => {
 				for (const condition of clause.conditions) {
 					this.checkExpr(condition);
 				}
-			});
+			}));
+			clauseWrites.push(writes);
 			const bodyType = this.checkExpr(clause.body, expected);
 			this.scope = previous;
 			result = result === null ? bodyType : joinTypes(result, bodyType);
 		}
+		semaOf(expr).clauseWrites = clauseWrites;
 		if (expr.elseBody) {
 			const elseType = this.checkExpr(expr.elseBody, expected);
 			result = result === null ? elseType : joinTypes(result, elseType);
@@ -2270,11 +2289,12 @@ class Checker {
 				});
 			}
 		}
-		this.inFailureContext(() => {
+		const { writes: filterWrites } = this.observeWrites(() => this.inFailureContext(() => {
 			for (const filter of expr.filters) {
 				this.checkExpr(filter);
 			}
-		});
+		}));
+		semaOf(expr).contextWrites = filterWrites;
 
 		if (fn) {
 			fn.loopDepth += 1;
@@ -2290,6 +2310,30 @@ class Checker {
 	// =====================================================================
 	// Failure / effect context helpers
 	// =====================================================================
+
+	/**
+	 * Runs a check while watching whether it infers the `writes` effect —
+	 * both direct `set`s and calls to functions whose effects include
+	 * writes. Used to prove failure contexts read-only so the compiler can
+	 * elide their transaction. The surrounding function's inferred effects
+	 * are preserved.
+	 */
+	private observeWrites<TResult>(body: () => TResult): { result: TResult; writes: boolean } {
+		const fn = this.currentFn();
+		if (!fn) {
+			return { result: body(), writes: true };
+		}
+		const saved = fn.inferred.writes;
+		fn.inferred.writes = false;
+		let writes = true;
+		try {
+			const result = body();
+			writes = fn.inferred.writes;
+			return { result, writes };
+		} finally {
+			fn.inferred.writes = writes || saved;
+		}
+	}
 
 	private inFailureContext<TResult>(body: () => TResult): TResult {
 		const fn = this.currentFn();

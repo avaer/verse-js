@@ -54,32 +54,37 @@ type JournalEntry =
 	| { kind: 'custom'; undo: () => void };
 
 export class Transaction {
-	entries: JournalEntry[] = [];
+	/** Allocated lazily on the first journaled write. */
+	entries: JournalEntry[] | null = null;
 	parent: Transaction | null;
 
 	constructor(parent: Transaction | null = null) {
 		this.parent = parent;
 	}
 
+	private push(entry: JournalEntry): void {
+		(this.entries ??= []).push(entry);
+	}
+
 	recordSlot(env: Value[], index: number): void {
-		this.entries.push({ kind: 'slot', env, index, prev: env[index] });
+		this.push({ kind: 'slot', env, index, prev: env[index] });
 	}
 
 	recordField(obj: VObject, name: string): void {
-		this.entries.push({ kind: 'field', obj, name, prev: obj.fields.get(name) });
+		this.push({ kind: 'field', obj, name, prev: obj.fields.get(name) });
 	}
 
 	recordElem(arr: Value[], index: number): void {
-		this.entries.push({ kind: 'elem', arr, index, prev: arr[index] });
+		this.push({ kind: 'elem', arr, index, prev: arr[index] });
 	}
 
 	recordArrayLength(arr: Value[]): void {
-		this.entries.push({ kind: 'arrayLen', arr, prevLen: arr.length });
+		this.push({ kind: 'arrayLen', arr, prevLen: arr.length });
 	}
 
 	recordMapEntry(map: VMap, key: Value): void {
 		const ckey = canonicalKey(key);
-		this.entries.push({
+		this.push({
 			kind: 'mapEntry',
 			map,
 			ckey,
@@ -89,12 +94,16 @@ export class Transaction {
 	}
 
 	recordCustom(undo: () => void): void {
-		this.entries.push({ kind: 'custom', undo });
+		this.push({ kind: 'custom', undo });
 	}
 
 	rollback(): void {
-		for (let i = this.entries.length - 1; i >= 0; i--) {
-			const entry = this.entries[i];
+		const entries = this.entries;
+		if (!entries) {
+			return;
+		}
+		for (let i = entries.length - 1; i >= 0; i--) {
+			const entry = entries[i];
 			switch (entry.kind) {
 				case 'slot':
 					entry.env[entry.index] = entry.prev;
@@ -120,14 +129,24 @@ export class Transaction {
 					break;
 			}
 		}
-		this.entries.length = 0;
+		this.entries = null;
 	}
 
 	/** Merge into the parent so an outer failure can still undo our writes. */
 	commit(): void {
-		if (this.parent) {
-			this.parent.entries.push(...this.entries);
+		const entries = this.entries;
+		if (!entries) {
+			return;
 		}
-		this.entries.length = 0;
+		if (this.parent) {
+			if (this.parent.entries) {
+				this.parent.entries.push(...entries);
+			} else {
+				this.parent.entries = entries;
+				this.entries = null;
+				return;
+			}
+		}
+		this.entries = null;
 	}
 }

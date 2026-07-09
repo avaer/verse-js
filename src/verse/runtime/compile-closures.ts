@@ -846,7 +846,8 @@ class Compiler {
 				if (!expr.value) {
 					return () => VOption.EMPTY;
 				}
-				const inner = this.compileFailureContext([expr.value], true);
+				const inner = this.compileFailureContext(
+					[expr.value], true, semaOf(expr).contextWrites !== false);
 				return (env, ctx) => chain(inner(env, ctx), (r) =>
 					r === FAIL ? VOption.EMPTY : VOption.someAllowingUndefined(r as Value));
 			}
@@ -884,6 +885,11 @@ class Compiler {
 			case 'OrExpr': {
 				const left = this.compileExpr(expr.left);
 				const right = this.compileExpr(expr.right);
+				if (semaOf(expr).contextWrites === false) {
+					// Read-only left side: nothing to roll back on failure.
+					return (env, ctx) => chain(left(env, ctx), (l) =>
+						l === FAIL ? right(env, ctx) : l);
+				}
 				return (env, ctx) => {
 					const saved = ctx.txn;
 					const txn = new Transaction(saved);
@@ -902,6 +908,11 @@ class Compiler {
 			}
 			case 'NotExpr': {
 				const operand = this.compileExpr(expr.operand);
+				if (semaOf(expr).contextWrites === false) {
+					// Read-only operand: nothing to roll back.
+					return (env, ctx) => chain(operand(env, ctx), (r) =>
+						r === FAIL ? undefined : FAIL);
+				}
 				return (env, ctx) => {
 					const saved = ctx.txn;
 					const txn = new Transaction(saved);
@@ -999,7 +1010,8 @@ class Compiler {
 				return (env, ctx) => runLoop(body, null, env, ctx);
 			}
 			case 'WhileExpr': {
-				const condition = this.compileFailureContext([expr.condition], true);
+				const condition = this.compileFailureContext(
+					[expr.condition], true, semaOf(expr).contextWrites !== false);
 				const body = this.compileStatement(expr.body);
 				return (env, ctx) => runLoop(body, condition, env, ctx);
 			}
@@ -1692,9 +1704,31 @@ class Compiler {
 	// Control flow
 	// =====================================================================
 
-	/** Runs `exprs` in a transaction; FAIL rolls back. Returns last value. */
-	private compileFailureContext(exprs: Expr[], commitOnSuccess: boolean): Code {
+	/**
+	 * Runs `exprs` in a transaction; FAIL rolls back. Returns last value.
+	 * When the checker proved the context read-only (`canWrite` false),
+	 * compiles a plain fail-check with no transaction at all.
+	 */
+	private compileFailureContext(exprs: Expr[], commitOnSuccess: boolean, canWrite = true): Code {
 		const codes = exprs.map((e) => this.compileExpr(e));
+		if (!canWrite) {
+			return (env, ctx) => {
+				const runFrom = (index: number, last: unknown): unknown => {
+					for (let i = index; i < codes.length; i++) {
+						const r = codes[i](env, ctx);
+						if (isPromise(r)) {
+							return r.then((v) => (v === FAIL ? FAIL : runFrom(i + 1, v)));
+						}
+						if (r === FAIL) {
+							return FAIL;
+						}
+						last = r;
+					}
+					return last;
+				};
+				return runFrom(0, undefined);
+			};
+		}
 		return (env, ctx) => {
 			const saved = ctx.txn;
 			const txn = new Transaction(saved);
@@ -1736,8 +1770,10 @@ class Compiler {
 	}
 
 	private compileIf(expr: IfExpr): Code {
-		const clauses = expr.clauses.map((clause) => ({
-			conditions: this.compileFailureContext(clause.conditions, true),
+		const clauseWrites = semaOf(expr).clauseWrites;
+		const clauses = expr.clauses.map((clause, i) => ({
+			conditions: this.compileFailureContext(
+				clause.conditions, true, clauseWrites?.[i] !== false),
 			body: this.compileExpr(clause.body),
 		}));
 		const elseBody = expr.elseBody ? this.compileExpr(expr.elseBody) : null;
@@ -1814,6 +1850,9 @@ class Compiler {
 			});
 		}
 		const filters = expr.filters.map((f) => this.compileExpr(f));
+		// No transaction when there are no filters, or the checker proved
+		// them read-only — there is nothing to roll back on a failing filter.
+		const filtersCanWrite = filters.length > 0 && semaOf(expr).contextWrites !== false;
 		const body = this.compileStatement(expr.body);
 		const line = expr.span.start.line;
 
@@ -1864,7 +1903,34 @@ class Compiler {
 				return iterate(0);
 			};
 
+			const runBody = (): unknown => {
+				const b = body(env, ctx);
+				return chain(b, (value) => {
+					if (!discardResults && value !== FAIL) {
+						results.push(value as Value);
+					}
+					return undefined;
+				});
+			};
+
 			const runFiltersAndBody = (): unknown => {
+				if (!filtersCanWrite) {
+					// Read-only (or absent) filters: a FAIL just skips the
+					// combo; nothing needs rolling back.
+					const checkPlain = (index: number): unknown => {
+						for (let i = index; i < filters.length; i++) {
+							const r = filters[i](env, ctx);
+							if (isPromise(r)) {
+								return r.then((v) => (v === FAIL ? undefined : checkPlain(i + 1)));
+							}
+							if (r === FAIL) {
+								return undefined;
+							}
+						}
+						return runBody();
+					};
+					return checkPlain(0);
+				}
 				// Filters are failable; a failing filter skips this combo.
 				const saved = ctx.txn;
 				const txn = new Transaction(saved);
@@ -1881,13 +1947,7 @@ class Compiler {
 					}
 					ctx.txn = saved;
 					txn.commit();
-				const b = body(env, ctx);
-				return chain(b, (value) => {
-					if (!discardResults && value !== FAIL) {
-						results.push(value as Value);
-					}
-					return undefined;
-				});
+					return runBody();
 				};
 				const skip = (): unknown => {
 					ctx.txn = saved;

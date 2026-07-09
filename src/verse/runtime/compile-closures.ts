@@ -1304,6 +1304,9 @@ class Compiler {
 				});
 			});
 		}
+		// Pick the operator implementation once at compile time: statically
+		// numeric/string operands skip applyBinary's dynamic dispatch.
+		const apply = selectBinaryOp(op, leftKind, rightKind, line);
 		return (env, ctx) => chain(left(env, ctx), (l) => {
 			if (l === FAIL) {
 				return FAIL;
@@ -1312,7 +1315,7 @@ class Compiler {
 				if (r === FAIL) {
 					return FAIL;
 				}
-				return applyBinary(op, l as Value, r as Value, line);
+				return apply(l as Value, r as Value);
 			});
 		});
 	}
@@ -2201,6 +2204,97 @@ function indexValue(target: Value, index: Value): Value | typeof FAIL {
 		return target.elements[i];
 	}
 	return FAIL;
+}
+
+type BinaryFn = (l: Value, r: Value) => Value | typeof FAIL;
+
+/**
+ * Compile-time operator selection. When the checker proved both operands
+ * numeric (or both strings), returns a monomorphic implementation with no
+ * runtime type dispatch; otherwise falls back to the generic applyBinary.
+ * Note ints are JS numbers here (documented deviation), so int arithmetic
+ * is plain number arithmetic.
+ */
+function selectBinaryOp(
+	op: string,
+	leftKind: string | undefined,
+	rightKind: string | undefined,
+	line: number,
+): BinaryFn {
+	const isNum = (k: string | undefined) => k === 'int' || k === 'float';
+	const bothNum = isNum(leftKind) && isNum(rightKind);
+	const bothInt = leftKind === 'int' && rightKind === 'int';
+	const bothStr = leftKind === 'string' && rightKind === 'string';
+	switch (op) {
+		case '+':
+			if (bothNum) {
+				return (l, r) => (l as number) + (r as number);
+			}
+			if (bothStr) {
+				return (l, r) => (l as string) + (r as string);
+			}
+			break;
+		case '-':
+			if (bothNum) {
+				return (l, r) => (l as number) - (r as number);
+			}
+			break;
+		case '*':
+			if (bothNum) {
+				return (l, r) => (l as number) * (r as number);
+			}
+			break;
+		case '/':
+			// Fast path for int/int: exact quotients stay ints without
+			// allocating a rational. (float-typed division is specialized
+			// even earlier, in compileBinary.)
+			if (bothInt) {
+				return (l, r) => {
+					const li = l as number;
+					const ri = r as number;
+					if (ri === 0) {
+						return FAIL;
+					}
+					if (li % ri === 0) {
+						return li / ri;
+					}
+					const rational = new VRational(li, ri);
+					return rational.den === 1 ? rational.num : rational;
+				};
+			}
+			break;
+		case '=':
+			if (bothNum || bothStr) {
+				return (l, r) => (l === r ? l : FAIL);
+			}
+			break;
+		case '<>':
+			if (bothNum || bothStr) {
+				return (l, r) => (l === r ? FAIL : l);
+			}
+			break;
+		case '<':
+			if (bothNum || bothStr) {
+				return (l, r) => ((l as number | string) < (r as number | string) ? l : FAIL);
+			}
+			break;
+		case '<=':
+			if (bothNum || bothStr) {
+				return (l, r) => ((l as number | string) <= (r as number | string) ? l : FAIL);
+			}
+			break;
+		case '>':
+			if (bothNum || bothStr) {
+				return (l, r) => ((l as number | string) > (r as number | string) ? l : FAIL);
+			}
+			break;
+		case '>=':
+			if (bothNum || bothStr) {
+				return (l, r) => ((l as number | string) >= (r as number | string) ? l : FAIL);
+			}
+			break;
+	}
+	return (l, r) => applyBinary(op, l, r, line);
 }
 
 function applyBinary(op: string, l: Value, r: Value, line: number): Value | typeof FAIL {

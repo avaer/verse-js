@@ -4,7 +4,7 @@
 // grouped by module; shows signatures, effects, docs, and examples.
 
 import React, { useMemo, useState } from 'react';
-import { generateBuiltinDocs } from '@/src/verse/runtime/docs.js';
+import { generateBuiltinDocs } from '@/src/verse/runtime/docs';
 
 function EffectBadge({ effect }) {
 	return (

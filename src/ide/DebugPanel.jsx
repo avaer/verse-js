@@ -1,9 +1,17 @@
 // DebugPanel.jsx
-// Shown while paused in the debugger: variables in scope and the call stack.
+// Shown while paused in the debugger: variables in scope, the call stack,
+// and the live task list (structured concurrency).
 
 import React from 'react';
 
-export default function DebugPanel({ variables, callStack, pausedLine }) {
+const TASK_STATE_COLORS = {
+	running: '#4ec9b0',
+	completed: '#8a8a8a',
+	failed: '#f48771',
+	cancelled: '#5a5a5a',
+};
+
+export default function DebugPanel({ variables, callStack, pausedLine, tasks }) {
 	return (
 		<div className="flex h-full min-h-0 flex-col overflow-hidden border-l border-[#2b2b2b] bg-[#181818]">
 			<div className="flex h-8 shrink-0 items-center border-b border-[#2b2b2b] px-3 select-none">
@@ -29,10 +37,6 @@ export default function DebugPanel({ variables, callStack, pausedLine }) {
 								<td className="w-[38%] truncate px-3 py-0.5 font-mono text-[12px] text-[#9cdcfe]">
 									{variable.name}
 								</td>
-								<td className="w-[20%] truncate py-0.5 pr-1 font-mono text-[11px] text-[#4ec9b0]">
-									{variable.type}
-									{variable.isConstant ? '' : ' (var)'}
-								</td>
 								<td className="truncate py-0.5 pr-3 font-mono text-[12px] text-[#ce9178]">
 									{variable.value}
 								</td>
@@ -55,6 +59,27 @@ export default function DebugPanel({ variables, callStack, pausedLine }) {
 						)}
 					</div>
 				))}
+
+				{tasks && tasks.length > 0 && (
+					<>
+						<div className="px-3 pt-3 pb-1 text-[11px] font-semibold tracking-wider text-[#8a8a8a] uppercase select-none">
+							Tasks
+						</div>
+						{tasks.map((task) => (
+							<div
+								key={task.id}
+								className="flex items-center gap-2 px-3 py-0.5 font-mono text-[12px] text-[#cccccc]"
+							>
+								<span
+									className="inline-block h-2 w-2 shrink-0 rounded-full"
+									style={{ backgroundColor: TASK_STATE_COLORS[task.state] || '#8a8a8a' }}
+								/>
+								<span className="truncate">{task.name}</span>
+								<span className="ml-auto shrink-0 text-[11px] text-[#5a5a5a]">{task.state}</span>
+							</div>
+						))}
+					</>
+				)}
 			</div>
 		</div>
 	);

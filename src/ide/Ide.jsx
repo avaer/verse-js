@@ -1,9 +1,10 @@
 // Ide.jsx
 // IDE shell: toolbar | sidebar | tabs + editor (+ debug panel) | console.
 // Owns all app state and the Run/Debug/Stop execution pipeline:
-//   source -> preprocess -> parse -> semantic analysis -> markers
-//          -> async interpreter -> console, with a DebugController
-//          implementing breakpoints/stepping/cancellation.
+//   source -> lexer -> parser -> checker -> markers
+//          -> closure compiler -> scheduler run -> console, with a
+//          DebugSession implementing breakpoints/stepping and the
+//          scheduler implementing Stop (structured cancellation).
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Toolbar from './Toolbar.jsx';
@@ -14,10 +15,15 @@ import Console from './Console.jsx';
 import DebugPanel from './DebugPanel.jsx';
 import DocsPanel from './DocsPanel.jsx';
 import { loadFiles, saveFiles, loadUiState, saveUiState, makeLogEntry } from './store.js';
-import { compileVerse } from '@/src/verse/compile.js';
-import { VerseInterpreter } from '@/src/verse/interpreter.js';
-import { DebugController } from '@/src/verse/debug/DebugController.js';
-import { VerseRunCancelled } from '@/src/verse/runtime/failure.js';
+import {
+	compileVerse,
+	compileProgram,
+	getNativeRegistry,
+	startRun as startVerseRun,
+	VerseRunCancelled,
+	VerseTaskCancelled,
+} from '@/src/verse/pipeline';
+import { DebugSession } from '@/src/verse/debug/DebugSession';
 import { EXAMPLE_FILES } from './examples.js';
 
 const MAX_LOG_ENTRIES = 2000;
@@ -50,8 +56,8 @@ export default function Ide() {
 	const [diagnostics, setDiagnostics] = useState({}); // { [file]: [diagnostic] }
 
 	const [runFile, setRunFile] = useState(null); // file the current run executes
-	const controllerRef = useRef(null);
-	const interpreterRef = useRef(null);
+	const sessionRef = useRef(null); // DebugSession of the current run
+	const runRef = useRef(null); // VerseRun handle (stop())
 	const runStateRef = useRef(runState);
 	useEffect(() => {
 		runStateRef.current = runState;
@@ -85,7 +91,7 @@ export default function Ide() {
 			const result = compileVerse(source);
 			setDiagnostics((previous) => ({
 				...previous,
-				[activeFile]: result.ok ? [] : [result.diagnostic],
+				[activeFile]: result.diagnostics,
 			}));
 		}, 300);
 		return () => clearTimeout(timeout);
@@ -168,8 +174,8 @@ export default function Ide() {
 			}
 			const next = { ...previous, [activeFile]: [...current] };
 			// Live-update the running debug session.
-			if (controllerRef.current && runFile === activeFile) {
-				controllerRef.current.setBreakpoints(next[activeFile]);
+			if (sessionRef.current && runFile === activeFile) {
+				sessionRef.current.setBreakpoints(next[activeFile]);
 			}
 			return next;
 		});
@@ -185,20 +191,20 @@ export default function Ide() {
 
 		appendLog('system', `— ${debugEnabled ? 'Debugging' : 'Running'} ${fileName} —`);
 
-		const result = compileVerse(source);
+		const result = compileVerse(source, { strict: true });
+		setDiagnostics((previous) => ({ ...previous, [fileName]: result.diagnostics }));
 		if (!result.ok) {
-			setDiagnostics((previous) => ({ ...previous, [fileName]: [result.diagnostic] }));
-			appendLog('error', result.diagnostic.message, {
-				file: fileName,
-				line: result.diagnostic.startLine,
-			});
+			for (const diagnostic of result.diagnostics.filter((d) => d.severity === 'error')) {
+				appendLog('error', diagnostic.message, {
+					file: fileName,
+					line: diagnostic.startLine,
+				});
+			}
 			return;
 		}
-		setDiagnostics((previous) => ({ ...previous, [fileName]: [] }));
 
-		const controller = new DebugController({
+		const session = new DebugSession({
 			debugEnabled,
-			lineMap: result.lineMap,
 			breakpoints: breakpoints[fileName] || [],
 			onPaused: (info) => {
 				setRunState('paused');
@@ -209,62 +215,81 @@ export default function Ide() {
 				setPausedInfo(null);
 			},
 		});
-		const interpreter = new VerseInterpreter({
-			onOutput: (line) => appendLog('stdout', line),
-			controller,
+
+		let compiled;
+		try {
+			compiled = compileProgram(
+				result.program,
+				getNativeRegistry(),
+				result.check.globalSlotCount,
+				result.check.deviceClasses,
+				{ debug: debugEnabled },
+			);
+		} catch (error) {
+			appendLog('error', `Compile error: ${error.message}`, { file: fileName });
+			return;
+		}
+
+		const run = startVerseRun(compiled, {
+			onOutput: (level, text) => appendLog(level, text),
+			debug: session,
+			persistence: {
+				load: (key) => window.localStorage.getItem(key),
+				store: (key, json) => window.localStorage.setItem(key, json),
+			},
 		});
 
-		controllerRef.current = controller;
-		interpreterRef.current = interpreter;
+		sessionRef.current = session;
+		runRef.current = run;
 		setRunFile(fileName);
 		setDebugSession(debugEnabled);
 		setRunState('running');
 		setPausedInfo(null);
 
-		interpreter
-			.interpret(result.ast)
+		run.done
 			.then(() => {
 				appendLog('system', '— Finished —');
 			})
 			.catch((error) => {
-				if (error instanceof VerseRunCancelled) {
+				if (error instanceof VerseRunCancelled || error instanceof VerseTaskCancelled) {
 					appendLog('system', '— Stopped —');
 					return;
 				}
-				const line = controller.toOriginalLine(interpreter.currentStatement);
 				appendLog('error', `Runtime error: ${error.message}`, {
 					file: fileName,
-					line,
+					line: error.line ?? run.ctx.line ?? null,
 				});
 			})
 			.finally(() => {
 				setRunState('idle');
 				setDebugSession(false);
 				setPausedInfo(null);
-				controllerRef.current = null;
-				interpreterRef.current = null;
+				sessionRef.current = null;
+				runRef.current = null;
 				setRunFile(null);
 			});
 	}, [activeFile, files, breakpoints, appendLog]);
 
 	const stopRun = useCallback(() => {
-		controllerRef.current?.cancel();
+		runRef.current?.stop();
+		// If paused at a breakpoint, wake the session so the run can unwind.
+		sessionRef.current?.wake();
 	}, []);
 
 	const continueRun = useCallback(() => {
-		controllerRef.current?.resume();
+		sessionRef.current?.resume();
 	}, []);
 
 	const stepOver = useCallback(() => {
-		controllerRef.current?.stepOver(interpreterRef.current);
+		sessionRef.current?.stepOver();
 	}, []);
 
 	const stepInto = useCallback(() => {
-		controllerRef.current?.stepInto();
+		sessionRef.current?.stepInto();
 	}, []);
 
 	const stepOut = useCallback(() => {
-		controllerRef.current?.stepOut(interpreterRef.current);
+		sessionRef.current?.stepOut();
 	}, []);
 
 	// --- keyboard shortcuts ---
@@ -442,6 +467,7 @@ export default function Ide() {
 										variables={pausedInfo?.variables}
 										callStack={pausedInfo?.callStack}
 										pausedLine={pausedInfo?.line}
+										tasks={pausedInfo?.tasks}
 									/>
 								</div>
 							)}

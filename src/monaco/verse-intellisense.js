@@ -4,7 +4,7 @@
 // shows its signature/docs; completions offer builtin symbols and, inside a
 // `using` declaration, the available module paths.
 
-import { buildSymbolIndex, getModulePaths, symbolDocToMarkdown } from '@/src/verse/runtime/docs.js';
+import { buildSymbolIndex, getModulePaths, symbolDocToMarkdown } from '@/src/verse/runtime/docs';
 
 const VERSE_LANGUAGE_ID = 'verse';
 

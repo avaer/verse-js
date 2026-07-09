@@ -1,0 +1,5 @@
+1:"$Sreact.fragment"
+2:I[59714,["/verse-js/_next/static/chunks/0e-17vosq0ifg.js","/verse-js/_next/static/chunks/0onjk8xrzbj_7.js"],"ViewportBoundary"]
+3:I[59714,["/verse-js/_next/static/chunks/0e-17vosq0ifg.js","/verse-js/_next/static/chunks/0onjk8xrzbj_7.js"],"MetadataBoundary"]
+4:"$Sreact.suspense"
+0:{"rsc":["$","$1","h",{"children":[null,["$","$L2",null,{"children":[["$","meta","0",{"charSet":"utf-8"}],["$","meta","1",{"name":"viewport","content":"width=device-width, initial-scale=1"}]]}],["$","div",null,{"hidden":true,"children":["$","$L3",null,{"children":["$","$4",null,{"name":"Next.Metadata","children":[["$","title","0",{"children":"Verse IDE — verse-js"}],["$","meta","1",{"name":"description","content":"Edit, run, and debug Verse in the browser: breakpoints, stepping, live diagnostics, and generated builtin docs."}]]}]}]}],["$","meta",null,{"name":"next-size-adjust","content":""}]]}],"isPartial":false,"staleTime":300,"varyParams":null,"buildId":"Xyqx0Ohgp4iGPbhYsI3q3"}

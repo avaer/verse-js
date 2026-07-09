@@ -4,7 +4,7 @@
 // journal every mutation so a failure rolls the world back, mirroring
 // Epic's VVMFailureContext/FTransaction design.
 
-import { canonicalKey, Value, VMap, VObject } from './values';
+import { Value, VMap, VObject } from './values';
 
 export class VerseRuntimeError extends Error {
 	line: number | null;
@@ -50,7 +50,7 @@ type JournalEntry =
 	| { kind: 'field'; obj: VObject; name: string; prev: Value }
 	| { kind: 'elem'; arr: Value[]; index: number; prev: Value }
 	| { kind: 'arrayLen'; arr: Value[]; prevLen: number }
-	| { kind: 'mapEntry'; map: VMap; ckey: string; had: boolean; prev: [Value, Value] | undefined }
+	| { kind: 'mapEntry'; map: VMap; key: Value; had: boolean; prev: [Value, Value] | undefined }
 	| { kind: 'custom'; undo: () => void };
 
 export class Transaction {
@@ -83,13 +83,15 @@ export class Transaction {
 	}
 
 	recordMapEntry(map: VMap, key: Value): void {
-		const ckey = canonicalKey(key);
+		// The stored pair keeps the original key object, so rollback can
+		// re-insert through the map's own two-tier key logic.
+		const prev = map.getPair(key);
 		this.push({
 			kind: 'mapEntry',
 			map,
-			ckey,
-			had: map.entries.has(ckey),
-			prev: map.entries.get(ckey),
+			key,
+			had: prev !== undefined,
+			prev,
 		});
 	}
 
@@ -119,9 +121,9 @@ export class Transaction {
 					break;
 				case 'mapEntry':
 					if (entry.had && entry.prev) {
-						entry.map.entries.set(entry.ckey, entry.prev);
+						entry.map.set(entry.prev[0], entry.prev[1]);
 					} else {
-						entry.map.entries.delete(entry.ckey);
+						entry.map.delete(entry.key);
 					}
 					break;
 				case 'custom':

@@ -135,9 +135,27 @@ export class VTuple {
 	}
 }
 
+/** Internal map key for `void` (can't use raw undefined: it means "miss"). */
+const VOID_KEY = Symbol('verse.void');
+
+/** Interned token for a structural (non-primitive) map key. */
+interface KeyToken {
+	ckey: string;
+}
+
 export class VMap {
-	/** canonical key -> [original key, value]; insertion-ordered. */
-	entries: Map<string, [Value, Value]>;
+	/**
+	 * Two-tier keys: primitive keys (int/float/string/logic, plus
+	 * integral rationals which equal their int) are used directly as JS
+	 * Map keys - no stringification per operation. Structural keys
+	 * (arrays, tuples, options, structs, ...) go through canonicalKey
+	 * once and are interned to a per-map token object.
+	 *
+	 * entries: internal key -> [original key, value]; insertion-ordered.
+	 */
+	entries: Map<unknown, [Value, Value]>;
+	/** canonical string -> token, for structural keys only (lazy). */
+	private interned: Map<string, KeyToken> | null = null;
 	weak: boolean;
 
 	constructor(weak = false) {
@@ -145,21 +163,62 @@ export class VMap {
 		this.weak = weak;
 	}
 
+	/**
+	 * Internal key for a Verse key value. With `create` false, returns
+	 * undefined when a structural key was never interned (a guaranteed
+	 * miss).
+	 */
+	private keyFor(key: Value, create: boolean): unknown {
+		if (key === undefined) {
+			return VOID_KEY;
+		}
+		const t = typeof key;
+		if (t === 'number' || t === 'string' || t === 'boolean') {
+			return key;
+		}
+		if (key instanceof VRational && key.den === 1) {
+			// Integral rationals compare equal to their int.
+			return key.num;
+		}
+		const ckey = canonicalKey(key);
+		if (create) {
+			let token = (this.interned ??= new Map()).get(ckey);
+			if (!token) {
+				token = { ckey };
+				this.interned.set(ckey, token);
+			}
+			return token;
+		}
+		return this.interned?.get(ckey);
+	}
+
 	get(key: Value): Failable<Value> {
-		const found = this.entries.get(canonicalKey(key));
+		const ik = this.keyFor(key, false);
+		if (ik === undefined) {
+			return FAIL;
+		}
+		const found = this.entries.get(ik);
 		return found === undefined ? FAIL : found[1];
 	}
 
+	/** The stored [original key, value] pair (transaction journal). */
+	getPair(key: Value): [Value, Value] | undefined {
+		const ik = this.keyFor(key, false);
+		return ik === undefined ? undefined : this.entries.get(ik);
+	}
+
 	has(key: Value): boolean {
-		return this.entries.has(canonicalKey(key));
+		const ik = this.keyFor(key, false);
+		return ik !== undefined && this.entries.has(ik);
 	}
 
 	set(key: Value, value: Value): void {
-		this.entries.set(canonicalKey(key), [key, value]);
+		this.entries.set(this.keyFor(key, true), [key, value]);
 	}
 
 	delete(key: Value): boolean {
-		return this.entries.delete(canonicalKey(key));
+		const ik = this.keyFor(key, false);
+		return ik !== undefined && this.entries.delete(ik);
 	}
 
 	get size(): number {
@@ -175,6 +234,9 @@ export class VMap {
 	clone(): VMap {
 		const copy = new VMap(this.weak);
 		copy.entries = new Map(this.entries);
+		// Tokens are shared with the clone; each map interns lookups
+		// through its own index, so shared tokens stay consistent.
+		copy.interned = this.interned ? new Map(this.interned) : null;
 		return copy;
 	}
 }

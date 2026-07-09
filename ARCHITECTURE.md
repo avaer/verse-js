@@ -176,11 +176,28 @@ The compiler applies a set of static specializations on top of that:
   array-length / map-entry entries; aliased targets keep the copying
   semantics.
 - **Inline caches + method-call fusion**: dynamic member sites carry a
-  per-site monomorphic cache keyed on class identity (classes are
-  immutable after compile, so no invalidation). `obj.Method(args)`
-  resolves through the cache and invokes with `self = obj` directly,
-  eliminating the per-call bound-function allocation; bare method reads
-  (`obj.Method` as a value) still bind.
+  per-site two-way polymorphic cache keyed on class identity (classes
+  are immutable after compile, so no invalidation; a miss shifts entry 1
+  down and refills entry 0). `obj.Method(args)` resolves through the
+  cache and invokes with `self = obj` directly, eliminating the per-call
+  bound-function allocation; bare method reads (`obj.Method` as a value)
+  still bind. Field reads use a single Map lookup (the `has` check only
+  runs for a stored void).
+- **Hoisted continuations**: statement wrappers are fused into the block
+  loop (one line-stamp and fail-check inline per statement, no wrapper
+  call), and the hot combinators (`if` clause chains, failure contexts,
+  `set`/definition stores, loop bodies) run their synchronous path with
+  zero per-evaluation closures — the async tails live in shared
+  module-level helpers that are only entered when something suspends.
+- **Range-loop fast path**: `for (I := lo..hi): body` with no filters
+  compiles to a plain numeric loop with no generator bookkeeping, no
+  iterables array, and no per-iteration collector closure; statement-
+  position loops skip result collection entirely.
+- **Call binding, refined**: parameters whose static type can never hold
+  a struct skip the per-call `copyIfStruct` instanceof check, and the
+  body runner (return-signal handling) is built once per function
+  definition — simple functions (no `branch`, no debug) run without the
+  per-call `finish` closure.
 - **Operator specialization**: when both operand types are statically
   numeric (or both strings), operators compile to monomorphic
   implementations with no runtime type dispatch; int/int division keeps
@@ -234,6 +251,38 @@ removed per-write journal entries but the failure-context bench is
 dominated by transaction setup and call overhead, so its headline
 number barely moved; the win shows up in conditions that only mutate
 their own locals, which now compile with no transaction at all.
+
+Optimization pass 3 (hoisted continuations / fused statement wrappers,
+range-loop fast path, refined call binding, single-lookup field reads,
+two-way polymorphic caches). Two harness notes first: `pnpm bench` now
+bundles with esbuild and runs under plain node — the previous `tsx`
+loader injected a `__name` keep-names shim into every compiled closure
+that accounted for roughly a third of measured time, so pass-3 numbers
+are not comparable to the tables above (the pass-1/2 tables were
+self-consistent, both measured under tsx). Cold single-shot runs also
+carry ±20% JIT noise, so decisions were gated on warm in-process
+medians (`scripts/oo-median.mts`, 15 runs).
+
+| bench (bundled, single-shot)         | before   | after    |
+| ------------------------------------ | -------- | -------- |
+| fib(24) recursive                    | ~28 ms   | ~19 ms   |
+| failure contexts (100k rollbacks)    | ~32 ms   | ~25 ms   |
+| OO dispatch (200k calls)             | ~41 ms   | ~36 ms   |
+| polymorphic dispatch — new           | —        | ~32 ms   |
+| array append (100k, in-place)        | ~12 ms   | ~9 ms    |
+| array churn / map churn / conc.      | ~flat    | ~flat    |
+
+On warm medians the two-way polymorphic cache cut the new mixed-site
+dispatch bench from 19.5–20.8 ms to ~16.7 ms (~15%) with no regression
+on monomorphic sites, and single-lookup field reads were a consistent
+~4% on the OO bench. One negative result, kept out: pooling
+`Transaction` objects through a free list measured flat (24.7 ms vs
+25.5 ms median on the failure bench, within noise) — the objects are
+two-field allocations that V8's young generation already handles well,
+so the added release bookkeeping wasn't worth it. The main remaining
+per-call cost is the argument-array allocation in the calling
+convention (`invoke(self, args)`); removing it needs arity-specialized
+invoke entry points and is recorded here as future work.
 
 ### Values
 
